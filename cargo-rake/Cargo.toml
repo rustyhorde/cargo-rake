@@ -1,0 +1,27 @@
+[package]
+authors = ["Jason Ozias <jason.g.ozias@gmail.com>"]
+categories = ["development-tools", "development-tools::build-utils"]
+description = "A configuration-driven build tool that runs named targets declared in a Rakefile.toml"
+documentation = "https://docs.rs/cargo-rake"
+edition = "2024"
+homepage = "https://github.com/rustyhorde/cargo-rake"
+keywords = ["cargo", "features", "build", "tool", "make"]
+license = "MIT OR Apache-2.0"
+name = "cargo-rake"
+readme = "README.md"
+repository = "https://github.com/rustyhorde/cargo-rake"
+rust-version = "1.91.1"
+version = "0.1.0"
+
+[features]
+unstable = ["librake/unstable"]
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+librake = { workspace = true }
+
+[build-dependencies]
+anyhow = { workspace = true }
+rustversion = { workspace = true }
+vergen-gix = { workspace = true }

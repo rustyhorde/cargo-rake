@@ -1,7 +1,7 @@
 [package]
 authors = ["Jason Ozias <jason.g.ozias@gmail.com>"]
 categories = ["development-tools", "development-tools::build-utils"]
-description = "Run feature matrices against cargo commands that support feature lists"
+description = "Core library for the cargo-rake/rake build tool: parse, validate, and run Rakefile.toml targets"
 documentation = "https://docs.rs/cargo-rake"
 edition = "2024"
 homepage = "https://github.com/rustyhorde/cargo-rake"

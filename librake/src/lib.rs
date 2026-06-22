@@ -49,7 +49,6 @@
         dangling_pointers_from_locals,
         dangling_pointers_from_temporaries,
         dead_code,
-        dead_code_pub_in_binary,
         deprecated,
         deprecated_in_future,
         deprecated_safe_2024,
@@ -81,7 +80,6 @@
         improper_ctypes,
         improper_ctypes_definitions,
         improper_gpu_kernel_arg,
-        incomplete_features,
         inline_no_sanitize,
         integer_to_ptr_transmutes,
         internal_eq_trait_method_impls,
@@ -96,8 +94,6 @@
         large_assignments,
         late_bound_lifetime_arguments,
         let_underscore_drop,
-        linker_info,
-        linker_messages,
         macro_use_extern_crate,
         malformed_diagnostic_attributes,
         malformed_diagnostic_format_literals,
@@ -175,7 +171,6 @@
         unsafe_attr_outside_unsafe,
         unsafe_code,
         unsafe_op_in_unsafe_fn,
-        unstable_features,
         unstable_name_collisions,
         unstable_syntax_pre_expansion,
         unsupported_calling_conventions,
@@ -297,6 +292,9 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
         let _ = writeln!(out, "    cmd: {}", target.cmd.join(" "));
         if !target.depends_on.is_empty() {
             let _ = writeln!(out, "    depends_on: {}", target.depends_on.join(", "));
+        }
+        if target.skip_on_error {
+            let _ = writeln!(out, "    skip_on_error: true");
         }
     }
     out

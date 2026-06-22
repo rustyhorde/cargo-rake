@@ -61,7 +61,7 @@ fn detect_cycle<'a>(
     }
 
     path.push(key);
-    in_path.insert(key);
+    let _ = in_path.insert(key);
     for dependency in &target.depends_on {
         let dependency = dependency.as_str();
         if in_path.contains(dependency) {
@@ -77,9 +77,9 @@ fn detect_cycle<'a>(
         }
         detect_cycle(targets, dependency, visited, path, in_path)?;
     }
-    path.pop();
-    in_path.remove(key);
-    visited.insert(key);
+    let _ = path.pop();
+    let _ = in_path.remove(key);
+    let _ = visited.insert(key);
     Ok(())
 }
 
@@ -122,12 +122,12 @@ fn order_visit<'a>(
         return;
     }
 
-    in_progress.insert(key);
+    let _ = in_progress.insert(key);
     for dependency in &target.depends_on {
         order_visit(targets, dependency, visited, in_progress, order);
     }
-    in_progress.remove(key);
-    visited.insert(key);
+    let _ = in_progress.remove(key);
+    let _ = visited.insert(key);
     order.push(key);
 }
 
@@ -137,19 +137,20 @@ mod tests {
     use crate::{error::Error, rakefile::Target};
     use indexmap::IndexMap;
 
-    type TestResult = core::result::Result<(), Box<dyn std::error::Error>>;
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn target(depends_on: &[&str]) -> Target {
         Target {
             cmd: vec!["true".to_string()],
             depends_on: depends_on.iter().map(|d| (*d).to_string()).collect(),
+            skip_on_error: false,
         }
     }
 
     fn graph(entries: &[(&str, &[&str])]) -> IndexMap<String, Target> {
         let mut map = IndexMap::new();
         for (name, deps) in entries {
-            map.insert((*name).to_string(), target(deps));
+            let _old = map.insert((*name).to_string(), target(deps));
         }
         map
     }

@@ -74,7 +74,6 @@
         improper_ctypes,
         improper_ctypes_definitions,
         improper_gpu_kernel_arg,
-        incomplete_features,
         inline_no_sanitize,
         integer_to_ptr_transmutes,
         internal_eq_trait_method_impls,
@@ -168,7 +167,6 @@
         unsafe_attr_outside_unsafe,
         unsafe_code,
         unsafe_op_in_unsafe_fn,
-        unstable_features,
         unstable_name_collisions,
         unstable_syntax_pre_expansion,
         unsupported_calling_conventions,
@@ -246,19 +244,35 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use std::ffi::OsString;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::process::exit;
+use std::sync::LazyLock;
 
 use anyhow::Result;
 use clap::Parser;
 use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets};
+use vergen_pretty::{Pretty, vergen_pretty_env};
+
+/// The semver followed by the `vergen-pretty` build/git/rustc/system banner,
+/// used as clap's `--version` (long) output.
+static LONG_VERSION: LazyLock<String> = LazyLock::new(|| {
+    let pretty = Pretty::builder().env(vergen_pretty_env!()).build();
+    let mut output = env!("CARGO_PKG_VERSION").to_string();
+    output.push_str("\n\n");
+    let mut cursor = Cursor::new(vec![]);
+    if pretty.display(&mut cursor).is_ok() {
+        output += &String::from_utf8_lossy(cursor.get_ref());
+    }
+    output
+});
 
 /// A configuration-driven build tool.
 ///
 /// Targets are declared in a `Rakefile.toml`. With no target, the `default`
 /// target is run.
 #[derive(Debug, Parser)]
-#[command(name = "cargo-rake", bin_name = "cargo rake", version)]
+#[command(name = "cargo-rake", bin_name = "cargo rake", version, long_version = LONG_VERSION.as_str())]
 struct Cli {
     /// Path to the Rakefile.
     #[arg(short, long, default_value = "Rakefile.toml")]
@@ -275,7 +289,7 @@ fn main() -> Result<()> {
     // Drop the leading `rake` so the remaining args parse like the `rake` binary.
     let mut args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|arg| arg == "rake") {
-        args.remove(1);
+        let _removed = args.remove(1);
     }
     run(&Cli::parse_from(args))
 }

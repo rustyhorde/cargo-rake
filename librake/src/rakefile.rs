@@ -19,6 +19,11 @@ pub struct Target {
     /// Other targets that must run, in order, before this one.
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// When `true`, a non-zero exit from this target's command is tolerated:
+    /// execution continues with the remaining steps instead of aborting the
+    /// dependency chain. Defaults to `false`.
+    #[serde(default)]
+    pub skip_on_error: bool,
 }
 
 /// A parsed `Rakefile.toml`.
@@ -30,12 +35,21 @@ pub struct Rakefile {
 
 impl Rakefile {
     /// Load and validate a `Rakefile.toml` from `path`.
+    ///
+    /// # Errors
+    /// Returns [`Error::Io`] if `path` cannot be read, or any error from
+    /// [`Rakefile::from_toml_str`] if the contents are invalid.
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
         let contents = std::fs::read_to_string(path)?;
         Self::from_toml_str(&contents)
     }
 
     /// Parse and validate a `Rakefile.toml` from a string.
+    ///
+    /// # Errors
+    /// Returns [`Error::Parse`] if `s` is not valid TOML or a target is missing
+    /// its `cmd`, or [`Error::EmptyCmd`] / [`Error::UnknownDependency`] /
+    /// [`Error::CircularDependency`] if validation fails.
     pub fn from_toml_str(s: &str) -> Result<Self> {
         let rakefile: Rakefile = toml::from_str(s)?;
         rakefile.validate()?;
@@ -71,8 +85,15 @@ impl Rakefile {
     ///
     /// Steps run in dependency order, each at most once. Execution stops at the
     /// first step that exits non-zero, returning that [`ExitStatus`]; otherwise
-    /// the final step's status is returned. A command that runs but fails is not
-    /// an [`Error`] — the caller decides what to do with the exit code.
+    /// the final step's status is returned. A step whose target sets
+    /// `skip_on_error` is the exception: a non-zero exit there is tolerated and
+    /// execution continues with the remaining steps. A command that runs but
+    /// fails is not an [`Error`] — the caller decides what to do with the exit
+    /// code.
+    ///
+    /// # Errors
+    /// Returns [`Error::UnknownTarget`] if `name` is not defined, or
+    /// [`Error::Spawn`] if a step's program cannot be launched.
     pub fn run(&self, name: &str) -> Result<ExitStatus> {
         let order = graph::execution_order(&self.targets, name)?;
         let mut status = None;
@@ -83,7 +104,7 @@ impl Rakefile {
             let current = run_one(step, target)?;
             let success = current.success();
             status = Some(current);
-            if !success {
+            if !success && !target.skip_on_error {
                 break;
             }
         }
@@ -114,7 +135,7 @@ mod tests {
     use super::Rakefile;
     use crate::error::Error;
 
-    type TestResult = core::result::Result<(), Box<dyn std::error::Error>>;
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     const SAMPLE: &str = r#"
 [target.build]
@@ -231,6 +252,41 @@ cmd = ["cargo", "doc"]
         let rakefile = Rakefile::from_toml_str(toml)?;
         let status = rakefile.run("version")?;
         assert!(status.success());
+        Ok(())
+    }
+
+    #[test]
+    fn skip_on_error_defaults_to_false() -> TestResult {
+        let toml = "[target.build]\ncmd = [\"cargo\", \"build\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let build = rakefile
+            .target("build")
+            .ok_or("expected a 'build' target")?;
+        assert!(!build.skip_on_error);
+        Ok(())
+    }
+
+    #[test]
+    fn skip_on_error_continues_chain() -> TestResult {
+        let toml = "[target.flaky]\ncmd = [\"false\"]\nskip_on_error = true\n\
+                    [target.all]\ncmd = [\"true\"]\ndepends_on = [\"flaky\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        // `flaky` exits non-zero but opts into skipping, so `all` still runs and
+        // its success is the status returned for the whole chain.
+        let status = rakefile.run("all")?;
+        assert!(status.success());
+        Ok(())
+    }
+
+    #[test]
+    fn failing_dependency_without_skip_aborts() -> TestResult {
+        let toml = "[target.flaky]\ncmd = [\"false\"]\n\
+                    [target.all]\ncmd = [\"true\"]\ndepends_on = [\"flaky\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        // `flaky` fails and does not skip, so the chain stops there: `all` never
+        // runs and the returned status reflects the failure.
+        let status = rakefile.run("all")?;
+        assert!(!status.success());
         Ok(())
     }
 }

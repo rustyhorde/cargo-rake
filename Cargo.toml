@@ -18,3 +18,4 @@ vergen-gix = { version = "10.0.0", features = [
     "rustc",
     "si",
 ] }
+vergen-pretty = { version = "10.0.0", features = ["color"] }

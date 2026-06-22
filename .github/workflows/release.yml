@@ -1,0 +1,61 @@
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+name: 🚀 Release 🚀
+
+jobs:
+  publish-crates:
+    name: 📦 Publish to crates.io 📦
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+    steps:
+      - name: ✅ Checkout ✅
+        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
+        with:
+          action: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+          attempt_limit: 3
+          attempt_delay: 30000
+
+      - name: 🧰 Install Rust 🧰
+        # stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: stable
+
+      - name: 📦 Publish crates in dependency order 📦
+        run: |
+          set -euo pipefail
+          # librake must land first; rake and cargo-rake depend on it by
+          # version. `cargo publish` blocks until the crate is queryable, but
+          # the index can still lag for dependents, so retry the dependent
+          # publishes.
+          publish_with_retry() {
+            local crate="$1"
+            for attempt in 1 2 3 4 5; do
+              if cargo publish -p "$crate" --locked --no-verify; then
+                return 0
+              fi
+              echo "Publish of ${crate} attempt ${attempt} failed; waiting 30s for the index..."
+              sleep 30
+            done
+            echo "All publish attempts for ${crate} failed."
+            return 1
+          }
+
+          publish_with_retry librake
+          publish_with_retry rake
+          publish_with_retry cargo-rake

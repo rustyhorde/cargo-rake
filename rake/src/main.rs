@@ -12,6 +12,12 @@
     )
 )]
 #![cfg_attr(nightly, allow(single_use_lifetimes))]
+// `linker_info`/`linker_messages` surface system-linker output triggered by
+// third-party prebuilt objects (e.g. `ring`'s `.o` files built against a newer
+// macOS SDK than our deployment target). That noise is environment-dependent
+// and outside our control, so allow rather than deny to avoid breaking the build
+// on CI runner/SDK updates (even under `-D warnings`).
+#![cfg_attr(nightly, allow(linker_info, linker_messages))]
 #![cfg_attr(
     nightly,
     deny(
@@ -88,8 +94,6 @@
         large_assignments,
         late_bound_lifetime_arguments,
         let_underscore_drop,
-        linker_info,
-        linker_messages,
         macro_use_extern_crate,
         malformed_diagnostic_attributes,
         malformed_diagnostic_format_literals,

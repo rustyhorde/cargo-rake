@@ -260,7 +260,9 @@ use std::process::ExitStatus;
 
 pub use crate::{
     error::{Error, Result},
-    rakefile::{Command, Rakefile, RunReport, Target, format_duration, print_runtime},
+    rakefile::{
+        Command, Rakefile, RunReport, Target, format_duration, print_runtime, print_total_runtime,
+    },
     tool::{SemverCheck, Tool},
 };
 

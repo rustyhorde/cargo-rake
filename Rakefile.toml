@@ -39,6 +39,7 @@ cmd = ["cargo", "matrix", "build"]
 
 [target.test]
 tools = ["matrix", "nextest"]
+depends_on = ["build"]
 [[target.test.command]]
 name = "test"
 cmd = ["cargo", "matrix", "nextest", "run"]
@@ -49,6 +50,7 @@ cmd = ["cargo", "matrix", "test", "--doc", "-p", "librake"]
 
 [target.coverage]
 tools = ["llvm-cov", "matrix", "nextest"]
+depends_on = ["test"]
 [[target.coverage.command]]
 name = "coverage"
 cmd = ["cargo", "matrix", "-F", "unstable", "llvm-cov", "nextest", "--no-report"]

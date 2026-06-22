@@ -113,15 +113,15 @@ fn runs_named_target() -> TestResult {
         .stdout(predicate::str::contains("Hello from rake!"))
         // The per-command status and runtime lines are printed to stderr; under
         // assert_cmd stderr is not a TTY, so they appear uncolored. Commands use
-        // a fixed "Running" prefix (6 leading spaces in the 13-char column)
-        // followed by `[name] -> program args`.
+        // a fixed "Running" prefix (5 leading spaces in the 12-char column)
+        // followed by the "[ rake ]" tag and `[ name ] program args`.
         .stderr(predicate::str::contains(
-            "      Running [say] -> echo Hello from rake!",
+            "     Running [ rake ] [ say ] echo Hello from rake!",
         ))
-        // Labels share that column: "Runtime" gets 6 leading spaces, "Total
-        // Runtime" none.
-        .stderr(predicate::str::contains("      Runtime "))
-        .stderr(predicate::str::contains("Total Runtime "));
+        // Labels share that column: per-command "Cmd Runtime" gets 1 leading
+        // space, the final "Runtime" gets 5.
+        .stderr(predicate::str::contains(" Cmd Runtime "))
+        .stderr(predicate::str::contains("     Runtime "));
     Ok(())
 }
 
@@ -240,8 +240,8 @@ fn missing_tool_is_installed_before_target() -> TestResult {
         .success()
         .stdout(predicate::str::contains("built with widget"))
         // The install notice is printed to stderr: the right-justified
-        // "Installing" prefix followed by the tool name.
-        .stderr(predicate::str::contains("Installing widget"));
+        // "Installing" prefix followed by the "[ rake ]" tag and the tool name.
+        .stderr(predicate::str::contains("Installing [ rake ] widget"));
     Ok(())
 }
 

@@ -194,7 +194,7 @@ fn run_one(name: &str, target: &Target) -> Result<(Option<ExitStatus>, bool)> {
     for command in &target.commands {
         let start = Instant::now();
         let status = spawn_command(name, command)?;
-        print_runtime("Runtime", start.elapsed());
+        print_runtime("Cmd Runtime", start.elapsed());
         last = Some(status);
         if !status.success() && !command.skip_on_error {
             return Ok((Some(status), true));
@@ -203,12 +203,25 @@ fn run_one(name: &str, target: &Target) -> Result<(Option<ExitStatus>, bool)> {
     Ok((last, false))
 }
 
-/// SGR escape for bold blue (command and tool status-line prefixes).
-pub(crate) const BOLD_BLUE: &str = "\x1b[1;34m";
+/// SGR escape for bold cyan (command and tool status-line prefixes), matching
+/// the color cargo paints its own status gutter.
+pub(crate) const BOLD_CYAN: &str = "\x1b[1;36m";
 /// SGR escape for bold green (runtime labels).
 pub(crate) const BOLD_GREEN: &str = "\x1b[1;32m";
+/// SGR escape for bold yellow — the value of the final total `Runtime` line.
+pub(crate) const BOLD_YELLOW: &str = "\x1b[1;33m";
+/// SGR escape for bold magenta — the [`RAKE_TAG`] marker prefixing every status
+/// line's info, matching nextest's package-name color so rake's own output reads
+/// apart from the subprocesses it spawns.
+pub(crate) const BOLD_MAGENTA: &str = "\x1b[1;35m";
+/// SGR escape for green (non-bold) — the command name (`[ <name> ]`) in a
+/// `Running` status line.
+pub(crate) const GREEN: &str = "\x1b[32m";
 /// SGR escape resetting all attributes.
 pub(crate) const RESET: &str = "\x1b[0m";
+
+/// The marker prefixing each status line's info to identify rake's own output.
+pub(crate) const RAKE_TAG: &str = "[ rake ]";
 
 /// The complete set of status-label prefixes: the command (`Running`) and
 /// runtime labels plus the tool-ensure verbs. The longest of these sets the
@@ -216,7 +229,7 @@ pub(crate) const RESET: &str = "\x1b[0m";
 /// not involved (they live in the line's info, after `Running`).
 const STATUS_LABELS: &[&str] = &[
     "Running",
-    "Total Runtime",
+    "Cmd Runtime",
     "Runtime",
     "Checking",
     "Installing",
@@ -240,19 +253,32 @@ const fn max_label_width() -> usize {
     max
 }
 
-/// The shared column every status-label prefix is right-justified into. A
-/// compile-time constant (currently 13, `"Total Runtime"`) derived from
-/// [`STATUS_LABELS`], so adding a longer label widens the column automatically.
-const LABEL_WIDTH: usize = max_label_width();
+/// Cargo right-justifies its own status labels into a 12-column gutter; we match
+/// it so rake's lines align with cargo's output.
+const CARGO_LABEL_WIDTH: usize = 12;
 
-/// The uncolored `label info` status line, with `label` right-justified into a
-/// `width`-char column. With an empty `info` only the justified label is
-/// emitted (no trailing space), e.g. `label_line("Checking", "", 13)`.
+/// The shared column every status-label prefix is right-justified into: the
+/// wider of cargo's [`CARGO_LABEL_WIDTH`] gutter and the longest
+/// [`STATUS_LABELS`] entry, so the output lines up with cargo and a longer label
+/// still widens the column automatically.
+const LABEL_WIDTH: usize = {
+    let derived = max_label_width();
+    if derived > CARGO_LABEL_WIDTH {
+        derived
+    } else {
+        CARGO_LABEL_WIDTH
+    }
+};
+
+/// The uncolored `label (rake) info` status line, with `label` right-justified
+/// into a `width`-char column and the [`RAKE_TAG`] marker prefixing the info.
+/// With an empty `info` only the justified label is emitted (no tag, no trailing
+/// space), e.g. `label_line("Checking", "", 13)`.
 fn label_line(label: &str, info: &str, width: usize) -> String {
     if info.is_empty() {
         format!("{label:>width$}")
     } else {
-        format!("{label:>width$} {info}")
+        format!("{label:>width$} {RAKE_TAG} {info}")
     }
 }
 
@@ -262,17 +288,25 @@ pub(crate) fn color_stderr() -> bool {
 }
 
 /// Print a status line to stderr: `label` right-justified into the shared
-/// [`LABEL_WIDTH`] column and painted `color` (bold) when stderr is a TTY and
-/// `NO_COLOR` is unset, then `info` in the default terminal color. Write errors
-/// are ignored — this output is best-effort.
-fn print_justified(color: &str, label: &str, info: &str) {
+/// [`LABEL_WIDTH`] column and painted `color` (bold), then the bold-magenta
+/// [`RAKE_TAG`] marker and `info` — `info` painted `value_color` when one is
+/// given, else the default terminal color. All coloring applies only when stderr
+/// is a TTY and `NO_COLOR` is unset. Write errors are ignored — best-effort.
+fn print_justified(color: &str, label: &str, info: &str, value_color: Option<&str>) {
     let width = LABEL_WIDTH;
     let mut err = stderr();
     let result = if color_stderr() {
         if info.is_empty() {
             writeln!(err, "{color}{label:>width$}{RESET}")
         } else {
-            writeln!(err, "{color}{label:>width$}{RESET} {info}")
+            let value = match value_color {
+                Some(vc) => format!("{vc}{info}{RESET}"),
+                None => info.to_string(),
+            };
+            writeln!(
+                err,
+                "{color}{label:>width$}{RESET} {BOLD_MAGENTA}{RAKE_TAG}{RESET} {value}"
+            )
         }
     } else {
         writeln!(err, "{}", label_line(label, info, width))
@@ -282,15 +316,15 @@ fn print_justified(color: &str, label: &str, info: &str) {
     let _ = result.ok();
 }
 
-/// Print a bold-blue-prefixed status line (commands and tools), right-justified
+/// Print a bold-cyan-prefixed status line (commands and tools), right-justified
 /// into the shared [`LABEL_WIDTH`] column.
 pub(crate) fn print_label(label: &str, info: &str) {
-    print_justified(BOLD_BLUE, label, info);
+    print_justified(BOLD_CYAN, label, info, None);
 }
 
 /// Spawn a single named command, inheriting the parent's stdio. A blank line and
-/// the command's status line (`Running [<name>] -> <program args>`) are printed
-/// first.
+/// the command's status line (`Running [ <name> ] <program args>`, the name
+/// green on a TTY) are printed first.
 fn spawn_command(target: &str, command: &Command) -> Result<ExitStatus> {
     let (program, args) = command.cmd.split_first().ok_or_else(|| Error::EmptyCmd {
         target: target.to_string(),
@@ -298,10 +332,12 @@ fn spawn_command(target: &str, command: &Command) -> Result<ExitStatus> {
     })?;
     // A blank line separates each command block from the previous output.
     let _ = writeln!(stderr()).ok();
-    print_label(
-        "Running",
-        &format!("[{}] -> {}", command.name, command.cmd.join(" ")),
-    );
+    let name = if color_stderr() {
+        format!("{GREEN}[ {} ]{RESET}", command.name)
+    } else {
+        format!("[ {} ]", command.name)
+    };
+    print_label("Running", &format!("{name} {}", command.cmd.join(" ")));
     ProcessCommand::new(program)
         .args(args)
         .status()
@@ -320,35 +356,43 @@ const US_PER_S: u128 = 1_000_000;
 /// Microseconds in a minute.
 const US_PER_MIN: u128 = 60_000_000;
 
+/// Minimum width of the integer part before the decimal point, space-padded so
+/// runtimes line up on the decimal point across `Cmd Runtime`/`Runtime` lines.
+const INT_WIDTH: usize = 4;
+/// Number of fractional digits rendered after the decimal point.
+const FRAC_DIGITS: usize = 5;
+/// `10^FRAC_DIGITS`, used to scale a sub-unit remainder to [`FRAC_DIGITS`] places.
+const FRAC_SCALE: u128 = 100_000;
+
 /// Render `value` microseconds as a decimal count of `unit`-microsecond units:
-/// the integer part, then a `width`-digit fraction with trailing zeros (and a
-/// bare trailing dot) trimmed, e.g. `decimal(1_010, 1_000, 3)` is `"1.01"`.
-fn decimal(value: u128, unit: u128, width: usize) -> String {
+/// the integer part (space-padded to [`INT_WIDTH`] so values line up on the
+/// decimal point), then exactly [`FRAC_DIGITS`] fractional digits, zero-padded
+/// (and truncated to that precision), e.g. `decimal(1_010, 1_000)` is
+/// `"   1.01000"`.
+fn decimal(value: u128, unit: u128) -> String {
     let int = value / unit;
-    let frac = value % unit;
-    if frac == 0 {
-        return int.to_string();
-    }
-    let frac = format!("{frac:0width$}");
-    format!("{int}.{}", frac.trim_end_matches('0'))
+    let frac = (value % unit) * FRAC_SCALE / unit;
+    format!("{int:>INT_WIDTH$}.{frac:0FRAC_DIGITS$}")
 }
 
 /// Format `elapsed` with microsecond precision, promoting the unit as the value
 /// grows: `µs`, then `ms`, then `s`, then composite `min`/`s` at the top tier.
-/// Trailing zeros are trimmed, e.g. `1.01 ms`, `1.501 s`, `1 min 30.5 s`.
+/// Every tier carries exactly [`FRAC_DIGITS`] digits after the decimal,
+/// zero-padded, with the integer part space-padded to [`INT_WIDTH`], e.g.
+/// ` 523.00000 µs`, `   1.01000 ms`, `   1.50100 s`, `1 min   30.50000 s`.
 #[must_use]
 pub fn format_duration(elapsed: Duration) -> String {
     let us = elapsed.as_micros();
     if us < US_PER_MS {
-        format!("{us} µs")
+        format!("{} µs", decimal(us, 1))
     } else if us < US_PER_S {
-        format!("{} ms", decimal(us, US_PER_MS, 3))
+        format!("{} ms", decimal(us, US_PER_MS))
     } else if us < US_PER_MIN {
-        format!("{} s", decimal(us, US_PER_S, 6))
+        format!("{} s", decimal(us, US_PER_S))
     } else {
         let mins = us / US_PER_MIN;
         let rem = us % US_PER_MIN;
-        format!("{mins} min {} s", decimal(rem, US_PER_S, 6))
+        format!("{mins} min {} s", decimal(rem, US_PER_S))
     }
 }
 
@@ -356,10 +400,22 @@ pub fn format_duration(elapsed: Duration) -> String {
 /// bold-green when stderr is a TTY and `NO_COLOR` is unset) followed by the
 /// [`format_duration`] rendering of `elapsed`. Justifying to the shared width
 /// lines the times up with the command/tool status lines and across the
-/// per-command `Runtime` and final `Total Runtime` lines. Write errors are
+/// per-command `Cmd Runtime` and final `Runtime` lines. Write errors are
 /// ignored — this output is best-effort.
 pub fn print_runtime(label: &str, elapsed: Duration) {
-    print_justified(BOLD_GREEN, label, &format_duration(elapsed));
+    print_justified(BOLD_GREEN, label, &format_duration(elapsed), None);
+}
+
+/// Like [`print_runtime`] for the binaries' final total: a bold-green `Runtime`
+/// label, but the [`format_duration`] value painted bold yellow to set the
+/// overall total apart from the per-command times.
+pub fn print_total_runtime(elapsed: Duration) {
+    print_justified(
+        BOLD_GREEN,
+        "Runtime",
+        &format_duration(elapsed),
+        Some(BOLD_YELLOW),
+    );
 }
 
 #[cfg(test)]
@@ -374,16 +430,16 @@ mod tests {
     #[test]
     fn format_duration_promotes_units() {
         let cases: &[(u64, &str)] = &[
-            (0, "0 µs"),
-            (100, "100 µs"),
-            (999, "999 µs"),
-            (1_000, "1 ms"),
-            (1_010, "1.01 ms"),
-            (1_000_000, "1 s"),
-            (1_501_000, "1.501 s"),
-            (60_000_000, "1 min 0 s"),
-            (90_500_000, "1 min 30.5 s"),
-            (3_661_500_000, "61 min 1.5 s"),
+            (0, "   0.00000 µs"),
+            (100, " 100.00000 µs"),
+            (999, " 999.00000 µs"),
+            (1_000, "   1.00000 ms"),
+            (1_010, "   1.01000 ms"),
+            (1_000_000, "   1.00000 s"),
+            (1_501_000, "   1.50100 s"),
+            (60_000_000, "1 min    0.00000 s"),
+            (90_500_000, "1 min   30.50000 s"),
+            (3_661_500_000, "61 min    1.50000 s"),
         ];
         for &(us, expected) in cases {
             assert_eq!(format_duration(Duration::from_micros(us)), expected);
@@ -419,20 +475,20 @@ cmd = ["cargo", "doc"]
     fn label_line_right_justifies_prefix() {
         use super::LABEL_WIDTH;
         // Commands print a fixed "Running" prefix (7 chars) justified into the
-        // 13-char column: 6 leading spaces, then a space before the info.
+        // 12-char column: 5 leading spaces, then the "[ rake ]" tag before the info.
         assert_eq!(
             super::label_line(
                 "Running",
                 "[compile] -> cargo build --all-features",
                 LABEL_WIDTH
             ),
-            "      Running [compile] -> cargo build --all-features"
+            "     Running [ rake ] [compile] -> cargo build --all-features"
         );
         // Empty info emits only the justified label, with no trailing space
-        // ("Checking" is 8 chars -> 5 leading spaces).
+        // ("Checking" is 8 chars -> 4 leading spaces).
         assert_eq!(
             super::label_line("Checking", "", LABEL_WIDTH),
-            "     Checking"
+            "    Checking"
         );
     }
 

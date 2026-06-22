@@ -8,7 +8,7 @@
 //! installed version is compared against the latest reported by its
 //! [`SemverCheck`] mode and re-installed if a newer one exists. Each ensure
 //! announces a `Checking` line and prints an outcome (`Present`, `Up to date`,
-//! `Installing`, or `Updating`), each a right-justified bold-blue status-label
+//! `Installing`, or `Updating`), each a right-justified bold-cyan status-label
 //! prefix in the run's shared column, matching the command status lines.
 
 use std::process::Command as ProcessCommand;
@@ -302,7 +302,7 @@ fn parse_version_token(stdout: &str) -> Option<Version> {
 }
 
 /// Print a tool status line via [`print_label`]: the `label` (e.g. `Checking`,
-/// `Installing`) as a right-justified bold-blue prefix in the shared status
+/// `Installing`) as a right-justified bold-cyan prefix in the shared status
 /// column, followed by the tool `name` and any `detail`. With an empty `detail`
 /// only the name is shown, e.g. `Checking matrix`.
 fn eprint_tool(label: &str, name: &str, detail: &[String]) {

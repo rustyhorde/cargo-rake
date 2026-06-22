@@ -250,7 +250,7 @@ use std::sync::LazyLock;
 
 use anyhow::Result;
 use clap::Parser;
-use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets, print_runtime};
+use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets, print_total_runtime};
 use vergen_pretty::{Pretty, vergen_pretty_env};
 
 // Dev-dependencies used only by the `tests/` integration suite; named here so
@@ -304,7 +304,7 @@ fn run(cli: &Cli) -> Result<()> {
         None => DEFAULT_TARGET,
     };
     let report = rakefile.run(target)?;
-    print_runtime("Total Runtime", report.elapsed);
+    print_total_runtime(report.elapsed);
     match report.status {
         Some(status) => exit(exit_code(status)),
         // No command ran (a depends-only target chain): treat as success.

@@ -135,27 +135,28 @@ impl Rakefile {
         self.targets.get(name)
     }
 
-    /// Run `name` after its transitive dependencies.
+    /// Run `names` (a set of root targets) after their transitive dependencies.
     ///
-    /// Targets run in dependency order, each at most once, and within a target
-    /// its commands run in array order. Execution stops at the first command
-    /// that exits non-zero, returning that [`ExitStatus`]; otherwise the final
-    /// command's status is returned. A command that sets `skip_on_error` is the
-    /// exception: a non-zero exit there is tolerated and execution continues
-    /// with the target's remaining commands and its dependents. A command that
-    /// runs but fails is not an [`Error`] — the caller decides what to do with
-    /// the exit code.
+    /// The roots' dependency graphs are merged into a single ordered set:
+    /// targets run in dependency order, each at most once even when shared by
+    /// several roots, and within a target its commands run in array order.
+    /// Execution stops at the first command that exits non-zero, returning that
+    /// [`ExitStatus`]; otherwise the final command's status is returned. A
+    /// command that sets `skip_on_error` is the exception: a non-zero exit there
+    /// is tolerated and execution continues with the target's remaining commands
+    /// and its dependents. A command that runs but fails is not an [`Error`] —
+    /// the caller decides what to do with the exit code.
     ///
     /// The returned [`RunReport`] carries the last command's status (its
-    /// `status` is `None` when no command runs at all — a target, and its
+    /// `status` is `None` when no command runs at all — targets, and their
     /// transitive dependencies, defined purely by `depends_on`; callers should
     /// treat that as success) and the total wall-clock time spent.
     ///
     /// # Errors
-    /// Returns [`Error::UnknownTarget`] if `name` is not defined, or
-    /// [`Error::Spawn`] if a command's program cannot be launched.
-    pub fn run(&self, name: &str) -> Result<RunReport> {
-        let order = graph::execution_order(&self.targets, name)?;
+    /// Returns [`Error::UnknownTarget`] if any entry in `names` is not defined,
+    /// or [`Error::Spawn`] if a command's program cannot be launched.
+    pub fn run(&self, names: &[&str]) -> Result<RunReport> {
+        let order = graph::execution_order(&self.targets, names)?;
         let start = Instant::now();
         let mut status = None;
         let mut ensured: HashSet<&str> = HashSet::new();
@@ -590,7 +591,7 @@ cmd = ["cargo", "doc"]
     #[test]
     fn run_unknown_target_errors() -> TestResult {
         let rakefile = Rakefile::from_toml_str(SAMPLE)?;
-        match rakefile.run("does-not-exist") {
+        match rakefile.run(&["does-not-exist"]) {
             Err(Error::UnknownTarget { name }) => {
                 assert_eq!(name, "does-not-exist");
                 Ok(())
@@ -604,7 +605,7 @@ cmd = ["cargo", "doc"]
         let toml = "[[target.go.command]]\nname = \"ghost\"\n\
                     cmd = [\"this-program-does-not-exist-cargo-rake\", \"--version\"]\n";
         let rakefile = Rakefile::from_toml_str(toml)?;
-        match rakefile.run("go") {
+        match rakefile.run(&["go"]) {
             Err(Error::Spawn {
                 target,
                 command,
@@ -624,7 +625,10 @@ cmd = ["cargo", "doc"]
     fn run_portable_command_succeeds() -> TestResult {
         let toml = "[[target.version.command]]\nname = \"ver\"\ncmd = [\"cargo\", \"--version\"]\n";
         let rakefile = Rakefile::from_toml_str(toml)?;
-        let status = rakefile.run("version")?.status.ok_or("expected a status")?;
+        let status = rakefile
+            .run(&["version"])?
+            .status
+            .ok_or("expected a status")?;
         assert!(status.success());
         Ok(())
     }
@@ -648,7 +652,7 @@ cmd = ["cargo", "doc"]
         let rakefile = Rakefile::from_toml_str(toml)?;
         // The first command fails without `skip_on_error`, so execution stops
         // there and `after` never runs: the returned status is the failure.
-        let status = rakefile.run("demo")?.status.ok_or("expected a status")?;
+        let status = rakefile.run(&["demo"])?.status.ok_or("expected a status")?;
         assert!(!status.success());
         Ok(())
     }
@@ -660,7 +664,7 @@ cmd = ["cargo", "doc"]
         let rakefile = Rakefile::from_toml_str(toml)?;
         // `boom` fails but opts into skipping, so `after` still runs and its
         // success is the status returned.
-        let status = rakefile.run("demo")?.status.ok_or("expected a status")?;
+        let status = rakefile.run(&["demo"])?.status.ok_or("expected a status")?;
         assert!(status.success());
         Ok(())
     }
@@ -673,7 +677,7 @@ cmd = ["cargo", "doc"]
         let rakefile = Rakefile::from_toml_str(toml)?;
         // `flaky` exits non-zero but opts into skipping, so `all` still runs and
         // its success is the status returned for the whole chain.
-        let status = rakefile.run("all")?.status.ok_or("expected a status")?;
+        let status = rakefile.run(&["all"])?.status.ok_or("expected a status")?;
         assert!(status.success());
         Ok(())
     }
@@ -686,7 +690,7 @@ cmd = ["cargo", "doc"]
         let rakefile = Rakefile::from_toml_str(toml)?;
         // `flaky` fails and does not skip, so the chain stops there: `all` never
         // runs and the returned status reflects the failure.
-        let status = rakefile.run("all")?.status.ok_or("expected a status")?;
+        let status = rakefile.run(&["all"])?.status.ok_or("expected a status")?;
         assert!(!status.success());
         Ok(())
     }
@@ -699,8 +703,40 @@ cmd = ["cargo", "doc"]
         let rakefile = Rakefile::from_toml_str(toml)?;
         // `all` has no command of its own; its status is that of the last
         // dependency to run.
-        let status = rakefile.run("all")?.status.ok_or("expected a status")?;
+        let status = rakefile.run(&["all"])?.status.ok_or("expected a status")?;
         assert!(status.success());
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_root_targets_run_in_one_call() -> TestResult {
+        // Two independent roots given together both run; the run succeeds.
+        let toml = "[[target.one.command]]\nname = \"a\"\ncmd = [\"true\"]\n\
+                    [[target.two.command]]\nname = \"b\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let status = rakefile
+            .run(&["one", "two"])?
+            .status
+            .ok_or("expected a status")?;
+        assert!(status.success());
+        Ok(())
+    }
+
+    #[test]
+    fn shared_dependency_of_two_roots_stops_run_once() -> TestResult {
+        // Both roots depend on `flaky`, which fails without `skip_on_error`.
+        // The shared dep runs once and aborts the whole merged chain.
+        let toml = "[[target.flaky.command]]\nname = \"boom\"\ncmd = [\"false\"]\n\
+                    [target.one]\ndepends_on = [\"flaky\"]\n\
+                    [[target.one.command]]\nname = \"a\"\ncmd = [\"true\"]\n\
+                    [target.two]\ndepends_on = [\"flaky\"]\n\
+                    [[target.two.command]]\nname = \"b\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let status = rakefile
+            .run(&["one", "two"])?
+            .status
+            .ok_or("expected a status")?;
+        assert!(!status.success());
         Ok(())
     }
 
@@ -712,7 +748,10 @@ cmd = ["cargo", "doc"]
                     [target.build]\ntools = [\"t\"]\n\
                     [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
         let rakefile = Rakefile::from_toml_str(toml)?;
-        let status = rakefile.run("build")?.status.ok_or("expected a status")?;
+        let status = rakefile
+            .run(&["build"])?
+            .status
+            .ok_or("expected a status")?;
         assert!(status.success());
         Ok(())
     }
@@ -725,7 +764,7 @@ cmd = ["cargo", "doc"]
                     [target.build]\ntools = [\"t\"]\n\
                     [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
         let rakefile = Rakefile::from_toml_str(toml)?;
-        match rakefile.run("build") {
+        match rakefile.run(&["build"]) {
             Err(Error::ToolInstallFailed { tool, .. }) => {
                 assert_eq!(tool, "t");
                 Ok(())
@@ -745,7 +784,10 @@ cmd = ["cargo", "doc"]
                     [target.build]\ntools = [\"t\"]\ndepends_on = [\"dep\"]\n\
                     [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
         let rakefile = Rakefile::from_toml_str(toml)?;
-        let status = rakefile.run("build")?.status.ok_or("expected a status")?;
+        let status = rakefile
+            .run(&["build"])?
+            .status
+            .ok_or("expected a status")?;
         assert!(status.success());
         Ok(())
     }

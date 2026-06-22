@@ -286,8 +286,9 @@ struct Cli {
     /// List the available targets instead of running one.
     #[arg(short, long)]
     list: bool,
-    /// The target to run (defaults to "default").
-    target: Option<String>,
+    /// The targets to run (defaults to "default"). Runs the union of their
+    /// dependency graphs, each target at most once.
+    targets: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -306,11 +307,12 @@ fn run(cli: &Cli) -> Result<()> {
         print!("{}", list_targets(&rakefile));
         return Ok(());
     }
-    let target = match cli.target.as_deref() {
-        Some(target) => target,
-        None => DEFAULT_TARGET,
+    let names: Vec<&str> = if cli.targets.is_empty() {
+        vec![DEFAULT_TARGET]
+    } else {
+        cli.targets.iter().map(String::as_str).collect()
     };
-    let report = rakefile.run(target)?;
+    let report = rakefile.run(&names)?;
     print_total_runtime(report.elapsed);
     match report.status {
         Some(status) => exit(exit_code(status)),

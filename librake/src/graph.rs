@@ -83,25 +83,34 @@ fn detect_cycle<'a>(
     Ok(())
 }
 
-/// Compute the execution order for `root`: its transitive dependencies first
-/// (each at most once, dependencies before dependents, declaration order as the
-/// tie-break), with `root` itself last.
+/// Compute the merged execution order for `roots`: the union of their
+/// transitive dependency graphs as a single ordered set — each target appears
+/// at most once (dependencies before dependents, declaration order as the
+/// tie-break), with each root after its own dependencies. Roots are seeded in
+/// the order given, so a target shared by several roots runs once, where the
+/// first root that reaches it places it.
 ///
-/// Returns [`Error::UnknownTarget`] if `root` is not present.
+/// Returns [`Error::UnknownTarget`] if any entry in `roots` is not present;
+/// every root is checked before any ordering happens, so an unknown target
+/// fails fast.
 pub(crate) fn execution_order<'a>(
     targets: &'a IndexMap<String, Target>,
-    root: &str,
+    roots: &[&str],
 ) -> Result<Vec<&'a str>> {
-    if !targets.contains_key(root) {
-        return Err(Error::UnknownTarget {
-            name: root.to_string(),
-        });
+    for root in roots {
+        if !targets.contains_key(*root) {
+            return Err(Error::UnknownTarget {
+                name: (*root).to_string(),
+            });
+        }
     }
 
     let mut order: Vec<&'a str> = Vec::new();
     let mut visited: HashSet<&'a str> = HashSet::new();
     let mut in_progress: HashSet<&'a str> = HashSet::new();
-    order_visit(targets, root, &mut visited, &mut in_progress, &mut order);
+    for root in roots {
+        order_visit(targets, root, &mut visited, &mut in_progress, &mut order);
+    }
     Ok(order)
 }
 
@@ -167,9 +176,45 @@ mod tests {
         // a -> {b, c}, b -> d, c -> d
         let targets = graph(&[("a", &["b", "c"]), ("b", &["d"]), ("c", &["d"]), ("d", &[])]);
         validate(&targets)?;
-        let order = execution_order(&targets, "a")?;
+        let order = execution_order(&targets, &["a"])?;
         assert_eq!(order, vec!["d", "b", "c", "a"]);
         Ok(())
+    }
+
+    #[test]
+    fn multiple_roots_merge_into_a_set() -> TestResult {
+        // x -> shared, y -> shared. Passing both roots runs `shared` once.
+        let targets = graph(&[
+            ("x", &["shared"]),
+            ("y", &["shared"]),
+            ("shared", &[]),
+            ("other", &[]),
+        ]);
+        validate(&targets)?;
+        let order = execution_order(&targets, &["x", "y"])?;
+        assert_eq!(order, vec!["shared", "x", "y"]);
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_roots_run_once() -> TestResult {
+        let targets = graph(&[("a", &[])]);
+        validate(&targets)?;
+        let order = execution_order(&targets, &["a", "a"])?;
+        assert_eq!(order, vec!["a"]);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_root_among_several_is_rejected() -> TestResult {
+        let targets = graph(&[("a", &[]), ("b", &[])]);
+        match execution_order(&targets, &["a", "nope", "b"]) {
+            Err(Error::UnknownTarget { name }) => {
+                assert_eq!(name, "nope");
+                Ok(())
+            }
+            other => Err(format!("expected UnknownTarget, got {other:?}").into()),
+        }
     }
 
     #[test]
@@ -205,7 +250,7 @@ mod tests {
     #[test]
     fn unknown_root_is_rejected() -> TestResult {
         let targets = graph(&[("a", &[])]);
-        match execution_order(&targets, "nope") {
+        match execution_order(&targets, &["nope"]) {
             Err(Error::UnknownTarget { name }) => {
                 assert_eq!(name, "nope");
                 Ok(())

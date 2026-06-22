@@ -63,8 +63,21 @@ cmd = ["cargo", "llvm-cov", "report", "--lcov", "--output-path", "lcov.info"]
 name = "html"
 cmd = ["cargo", "llvm-cov", "report", "--html"]
 
-[target.all]
+[target.install]
+depends_on = ["build"]
+[[target.install.command]]
+name = "install"
+cmd = ["cargo", "install", "--path", "cargo-rake", "--force", "--locked"]
+
+[[target.clean.command]]
+name = "clean"
+cmd = ["cargo", "clean"]
+
+[target.most]
 depends_on = ["fmt", "clippy", "build", "test", "coverage"]
 
+[target.all]
+depends_on = ["fmt", "clippy", "build", "test", "coverage", "install", "clean"]
+
 [target.default]
-depends_on = ["all"]
+depends_on = ["most"]

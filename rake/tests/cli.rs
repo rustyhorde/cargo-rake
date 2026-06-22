@@ -122,6 +122,21 @@ fn runs_named_target() -> TestResult {
 }
 
 #[test]
+fn runs_multiple_named_targets() -> TestResult {
+    let dir = rakefile_dir(SAMPLE)?;
+    // Two roots given together: `hello` and `after_skip` (which runs `skip`
+    // first). Both their command outputs appear in one run.
+    rake(&dir)?
+        .arg("hello")
+        .arg("after_skip")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hello from rake!"))
+        .stdout(predicate::str::contains("ran after skip"));
+    Ok(())
+}
+
+#[test]
 fn runs_default_target_when_none_given() -> TestResult {
     let dir = rakefile_dir(SAMPLE)?;
     rake(&dir)?

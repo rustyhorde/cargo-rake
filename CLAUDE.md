@@ -42,4 +42,4 @@ Three crates, sharing dependency versions via `[workspace.dependencies]`:
 - A command that *runs but exits non-zero* is not an `Error`; its `ExitStatus` propagates so the caller chooses the process exit code (`exit_code` maps a signal-killed child to `1`). Reserve `Error` for load/parse/validation/spawn failures.
 - Target order is significant and preserved with `IndexMap` (`toml` uses `preserve_order`); don't swap in a `HashMap`.
 - Each crate's `build.rs` uses `vergen-gix` to emit build/git/rustc/system info, rendered by `vergen-pretty` as the binaries' `--version` long output.
-- Edition 2024, MSRV 1.91.1.
+- Edition 2024, MSRV 1.95.0.

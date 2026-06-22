@@ -1,0 +1,6 @@
+# proc-macro-error2 is unmaintained (RUSTSEC-2026-0173) with no patched release.
+# It only enters Cargo.lock through jiff's optional, disabled `defmt` feature
+# (jiff -> defmt -> defmt-macros -> proc-macro-error2) and is never actually compiled.
+# Revisit if jiff/gix drop the optional dep or a maintained fork appears.
+[advisories]
+ignore = ["RUSTSEC-2026-0173"]

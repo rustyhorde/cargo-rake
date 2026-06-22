@@ -5,13 +5,19 @@ members = ["librake", "cargo-rake", "rake"]
 
 [workspace.dependencies]
 anyhow = "1.0.102"
+assert_cmd = "2.2.2"
 clap = { version = "4.6.1", features = ["derive"] }
 indexmap = { version = "2.14.0", features = ["serde"] }
 librake = { version = "0.1.0", path = "librake" }
+predicates = "3.1.4"
 rustversion = "1.0.22"
+semver = "1.0.28"
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tempfile = "3.27.0"
 thiserror = "2.0.18"
 toml = { version = "1.1.2", features = ["preserve_order"] }
+ureq = { version = "3.3.0", features = ["json"] }
 vergen-gix = { version = "10.0.0", features = [
     "build",
     "cargo",

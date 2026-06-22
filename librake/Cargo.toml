@@ -18,9 +18,14 @@ unstable = []
 
 [dependencies]
 indexmap = { workspace = true }
+semver = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
+ureq = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [build-dependencies]
 anyhow = { workspace = true }

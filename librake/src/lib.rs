@@ -1,9 +1,12 @@
 //! Core library for `cargo-rake` / `rake`: a configuration-driven build tool.
 //!
-//! A `Rakefile.toml` declares named targets at the top level, each with a
-//! required `cmd` (the program and arguments to run) and an optional
-//! `depends_on` list. Targets are parsed and validated by [`Rakefile`], and run
-//! in dependency order via [`Rakefile::run`].
+//! A `Rakefile.toml` declares named targets at the top level, each with an
+//! ordered array of named commands (every command has a `cmd` to run and an
+//! optional `skip_on_error` flag), an optional `depends_on` list, and an
+//! optional `tools` list naming entries in a top-level `[tool.<name>]` table.
+//! Targets are parsed and validated by [`Rakefile`], and run in dependency
+//! order via [`Rakefile::run`]; a target's commands run in array order, after
+//! its referenced [`Tool`]s have been ensured (installed if missing).
 
 //! librake
 
@@ -245,18 +248,20 @@
     )
 )]
 #![cfg_attr(all(docsrs), feature(doc_cfg))]
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+// #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 mod error;
 mod graph;
 mod rakefile;
+mod tool;
 
 use std::fmt::Write as _;
 use std::process::ExitStatus;
 
 pub use crate::{
     error::{Error, Result},
-    rakefile::{Rakefile, Target},
+    rakefile::{Command, Rakefile, RunReport, Target, format_duration, print_runtime},
+    tool::{SemverCheck, Tool},
 };
 
 /// The target run when none is named on the command line.
@@ -289,12 +294,24 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
 
     for (name, target) in rakefile.targets() {
         let _ = writeln!(out, "{name}");
-        let _ = writeln!(out, "    cmd: {}", target.cmd.join(" "));
         if !target.depends_on.is_empty() {
             let _ = writeln!(out, "    depends_on: {}", target.depends_on.join(", "));
         }
-        if target.skip_on_error {
-            let _ = writeln!(out, "    skip_on_error: true");
+        if !target.tools.is_empty() {
+            let _ = writeln!(out, "    tools: {}", target.tools.join(", "));
+        }
+        for command in &target.commands {
+            let marker = if command.skip_on_error {
+                " (skip_on_error)"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                out,
+                "    {}: {}{marker}",
+                command.name,
+                command.cmd.join(" ")
+            );
         }
     }
     out

@@ -1,0 +1,68 @@
+[tool.matrix]
+crate = "cargo-matrix"
+check = ["cargo", "matrix", "--version"]
+install = ["cargo", "install", "cargo-matrix", "--force", "--locked"]
+update = true
+
+[tool.nextest]
+crate = "cargo-nextest"
+check = ["cargo", "nextest", "--version"]
+install = ["cargo", "install", "cargo-nextest", "--force", "--locked"]
+update = true
+
+[tool.llvm-cov]
+crate = "cargo-llvm-cov"
+check = ["cargo", "llvm-cov", "--version"]
+install = ["cargo", "install", "cargo-llvm-cov", "--force", "--locked"]
+update = true
+
+[[target.fmt.command]]
+name = "fmt"
+cmd = ["cargo", "fmt"]
+
+[[target.fmt.command]]
+name = "fmt check"
+cmd = ["cargo", "fmt", "--all", "--", "--check"]
+
+[target.clippy]
+tools = ["matrix"]
+
+[[target.clippy.command]]
+name = "clippy"
+cmd = ["cargo", "matrix", "clippy", "--all-targets", "--", "-Dwarnings"]
+
+[target.build]
+tools = ["matrix"]
+[[target.build.command]]
+name = "build"
+cmd = ["cargo", "matrix", "build"]
+
+[target.test]
+tools = ["matrix", "nextest"]
+[[target.test.command]]
+name = "test"
+cmd = ["cargo", "matrix", "nextest", "run"]
+
+[[target.doc_test.command]]
+name = "doc test"
+cmd = ["cargo", "matrix", "test", "--doc", "-p", "librake"]
+
+[target.coverage]
+tools = ["llvm-cov", "matrix", "nextest"]
+[[target.coverage.command]]
+name = "coverage"
+cmd = ["cargo", "matrix", "-F", "unstable", "llvm-cov", "nextest", "--no-report"]
+
+[[target.coverage.command]]
+name = "lcov.info"
+cmd = ["cargo", "llvm-cov", "report", "--lcov", "--output-path", "lcov.info"]
+
+[[target.coverage.command]]
+name = "html"
+cmd = ["cargo", "llvm-cov", "report", "--html"]
+
+[target.all]
+depends_on = ["fmt", "clippy", "build", "test", "coverage"]
+
+[target.default]
+depends_on = ["all"]

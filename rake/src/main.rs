@@ -241,7 +241,7 @@
     )
 )]
 #![cfg_attr(all(docsrs), feature(doc_cfg))]
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+// #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -250,8 +250,14 @@ use std::sync::LazyLock;
 
 use anyhow::Result;
 use clap::Parser;
-use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets};
+use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets, print_runtime};
 use vergen_pretty::{Pretty, vergen_pretty_env};
+
+// Dev-dependencies used only by the `tests/` integration suite; named here so
+// the nightly `unused_crate_dependencies` deny sees them as used when the bin
+// is type-checked in test configuration.
+#[cfg(test)]
+use {assert_cmd as _, predicates as _, tempfile as _};
 
 /// The semver followed by the `vergen-pretty` build/git/rustc/system banner,
 /// used as clap's `--version` (long) output.
@@ -297,6 +303,11 @@ fn run(cli: &Cli) -> Result<()> {
         Some(target) => target,
         None => DEFAULT_TARGET,
     };
-    let status = rakefile.run(target)?;
-    exit(exit_code(status));
+    let report = rakefile.run(target)?;
+    print_runtime("Total Runtime", report.elapsed);
+    match report.status {
+        Some(status) => exit(exit_code(status)),
+        // No command ran (a depends-only target chain): treat as success.
+        None => exit(0),
+    }
 }

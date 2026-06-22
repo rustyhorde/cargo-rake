@@ -134,16 +134,23 @@ fn order_visit<'a>(
 #[cfg(test)]
 mod tests {
     use super::{execution_order, validate};
-    use crate::{error::Error, rakefile::Target};
+    use crate::{
+        error::Error,
+        rakefile::{Command, Target},
+    };
     use indexmap::IndexMap;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn target(depends_on: &[&str]) -> Target {
         Target {
-            cmd: vec!["true".to_string()],
+            commands: vec![Command {
+                name: "run".to_string(),
+                cmd: vec!["true".to_string()],
+                skip_on_error: false,
+            }],
             depends_on: depends_on.iter().map(|d| (*d).to_string()).collect(),
-            skip_on_error: false,
+            tools: Vec::new(),
         }
     }
 

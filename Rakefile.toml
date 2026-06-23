@@ -1,3 +1,10 @@
+# The Rust toolchain this project targets. When set, both `rake` and `cargo
+# rake` verify/install the channel (via rustup) and pin the run to it; optional,
+# and omitted here so this repo's runs use the active toolchain. Accepts
+# "stable"/"beta"/"nightly" or any rustup toolchain (e.g. "1.95.0",
+# "nightly-2024-01-01").
+# toolchain = "stable"
+
 [tool.matrix]
 crate = "cargo-matrix"
 check = ["cargo", "matrix", "--version"]

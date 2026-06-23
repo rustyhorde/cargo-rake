@@ -55,6 +55,12 @@ pub struct Rakefile {
     targets: IndexMap<String, Target>,
     #[serde(rename = "tool", default)]
     tools: IndexMap<String, Tool>,
+    /// The Rust toolchain channel the project requires (`stable`, `beta`,
+    /// `nightly`, or any valid rustup toolchain such as `1.89.0`). Optional:
+    /// when present, both binaries verify/install and pin the run to it; when
+    /// omitted (`None`) the active toolchain is used as-is.
+    #[serde(default)]
+    toolchain: Option<String>,
 }
 
 /// The outcome of running a target: the exit status of the last command that
@@ -96,9 +102,19 @@ impl Rakefile {
     }
 
     /// Every target must define at least one command or dependency, each
-    /// command's `cmd` must be non-empty, and the dependency graph must be valid
-    /// (no unknown dependencies, no cycles).
+    /// command's `cmd` must be non-empty, the `toolchain` must be a single
+    /// non-empty token, and the dependency graph must be valid (no unknown
+    /// dependencies, no cycles).
     fn validate(&self) -> Result<()> {
+        // When declared, the channel must be a single clean token, so it can be
+        // passed safely to the rustup installer as a `--default-toolchain` arg.
+        if let Some(toolchain) = &self.toolchain
+            && (toolchain.is_empty() || toolchain.chars().any(char::is_whitespace))
+        {
+            return Err(Error::InvalidToolchain {
+                value: toolchain.clone(),
+            });
+        }
         for (name, target) in &self.targets {
             if target.commands.is_empty() && target.depends_on.is_empty() {
                 return Err(Error::EmptyTarget {
@@ -135,6 +151,12 @@ impl Rakefile {
     #[must_use]
     pub fn tools(&self) -> &IndexMap<String, Tool> {
         &self.tools
+    }
+
+    /// The Rust toolchain channel this Rakefile targets, if one is declared.
+    #[must_use]
+    pub fn toolchain(&self) -> Option<&str> {
+        self.toolchain.as_deref()
     }
 
     /// Look up a single target by name.
@@ -517,6 +539,36 @@ cmd = ["cargo", "doc"]
         // Commands within a target keep their array (declaration) order.
         let commands: Vec<&str> = all.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(commands, vec!["release", "doc"]);
+        Ok(())
+    }
+
+    #[test]
+    fn toolchain_absent_is_none() -> TestResult {
+        // SAMPLE omits `toolchain`, so the key is absent.
+        assert_eq!(Rakefile::from_toml_str(SAMPLE)?.toolchain(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn toolchain_round_trips_explicit_value() -> TestResult {
+        let src = format!("toolchain = \"nightly\"\n{SAMPLE}");
+        assert_eq!(Rakefile::from_toml_str(&src)?.toolchain(), Some("nightly"));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_toolchain_is_rejected() -> TestResult {
+        for value in ["", "night ly", " stable", "a\tb"] {
+            let src = format!("toolchain = \"{value}\"\n{SAMPLE}");
+            match Rakefile::from_toml_str(&src) {
+                Err(Error::InvalidToolchain { value: got }) => assert_eq!(got, value),
+                other => {
+                    return Err(
+                        format!("expected InvalidToolchain for {value:?}, got {other:?}").into(),
+                    );
+                }
+            }
+        }
         Ok(())
     }
 

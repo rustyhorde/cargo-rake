@@ -281,7 +281,14 @@ fn main() -> Result<()> {
         .version(env!("CARGO_PKG_VERSION"))
         .long_version(LONG_VERSION.as_str())
         .get_matches();
-    run(&Cli::from_arg_matches(&matches)?)
+    // Surface a failed run via its (chained) Display rather than anyhow's
+    // default `Error: {Debug}`, so the toolchain-requirement notice reads
+    // cleanly. `run` exits the process itself on the success path.
+    if let Err(err) = run(&Cli::from_arg_matches(&matches)?) {
+        eprintln!("{err:#}");
+        exit(1);
+    }
+    Ok(())
 }
 
 fn run(cli: &Cli) -> Result<()> {
@@ -290,6 +297,9 @@ fn run(cli: &Cli) -> Result<()> {
         print!("{}", list_targets(&rakefile));
         return Ok(());
     }
+    // `rake` may run on a machine without Rust; ensure a toolchain before any
+    // target (which almost always shells out to cargo) runs.
+    librake::ensure_rust_toolchain(rakefile.toolchain())?;
     let names: Vec<&str> = if cli.targets.is_empty() {
         vec![DEFAULT_TARGET]
     } else {

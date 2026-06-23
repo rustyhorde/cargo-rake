@@ -118,6 +118,44 @@ pub enum Error {
         /// The non-zero exit status of the install command.
         status: ExitStatus,
     },
+    /// A Rust toolchain (cargo) is required to run targets but none is available
+    /// — it was not found and installation was declined, impossible (no
+    /// interactive terminal), or did not make cargo available.
+    #[error(
+        "a Rust toolchain is required to run targets, but 'cargo' was not found.\nInstall Rust from https://rustup.rs and try again."
+    )]
+    RustToolchainMissing,
+    /// The rustup installer could not be launched.
+    #[error("failed to install Rust: could not launch '{program}'")]
+    RustInstallSpawn {
+        /// The program that could not be launched (the installer shell).
+        program: String,
+        /// The underlying I/O error.
+        source: io::Error,
+    },
+    /// The rustup installer ran but exited non-zero.
+    #[error("failed to install Rust: the rustup installer exited with {status}")]
+    RustInstallFailed {
+        /// The non-zero exit status of the installer.
+        status: ExitStatus,
+    },
+    /// The requested Rust toolchain channel is not installed and installing it
+    /// was declined or impossible (no interactive terminal).
+    #[error(
+        "the '{toolchain}' Rust toolchain is required but not installed.\nInstall it with `rustup toolchain install {toolchain}` and try again."
+    )]
+    RustChannelMissing {
+        /// The requested toolchain channel that is not installed.
+        toolchain: String,
+    },
+    /// The top-level `toolchain` value is empty or contains whitespace.
+    #[error(
+        "invalid toolchain '{value}': it must be a single non-empty token (e.g. stable, nightly, 1.89.0)"
+    )]
+    InvalidToolchain {
+        /// The offending `toolchain` value.
+        value: String,
+    },
 }
 
 /// A `Result` alias using this crate's [`Error`].

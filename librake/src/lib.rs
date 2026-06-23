@@ -255,6 +255,7 @@ mod error;
 mod graph;
 mod rakefile;
 mod tool;
+mod toolchain;
 
 use std::fmt::Write as _;
 use std::process::ExitStatus;
@@ -265,6 +266,7 @@ pub use crate::{
         Command, Rakefile, RunReport, Target, format_duration, print_runtime, print_total_runtime,
     },
     tool::{SemverCheck, Tool},
+    toolchain::ensure_rust_toolchain,
 };
 
 /// The target run when none is named on the command line.

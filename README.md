@@ -30,20 +30,87 @@ paru -S rake                # build from source
 paru -S rake-unstable       # build from source, nightly unstable build
 ```
 
-### Debian/Ubuntu and Fedora/RHEL (`rake`)
+### Debian/Ubuntu (`rake`)
 
-Download the `.deb` or `.rpm` for your architecture from the
-[latest release](https://github.com/rustyhorde/cargo-rake/releases/latest):
+#### From the apt repository (recommended)
+
+The signed apt repository at <https://rustyhorde.github.io/cargo-rake-packages/>
+tracks every release, so `apt upgrade` keeps `rake` current. Packages are
+available for `amd64` and `arm64`:
 
 ```bash
-sudo dpkg -i rake_*_amd64.deb     # Debian/Ubuntu
-sudo rpm -i rake-*.x86_64.rpm     # Fedora/RHEL
+# Add the repository signing key
+sudo install -d /etc/apt/keyrings
+curl -fsSL https://rustyhorde.github.io/cargo-rake-packages/gpg.key \
+    | sudo gpg --dearmor -o /etc/apt/keyrings/rake.gpg
+
+# Add the apt source
+echo "deb [arch=amd64,arm64 signed-by=/etc/apt/keyrings/rake.gpg] \
+  https://rustyhorde.github.io/cargo-rake-packages/apt stable main" \
+    | sudo tee /etc/apt/sources.list.d/rake.list
+
+# Install
+sudo apt update
+sudo apt install rake
+```
+
+The same repository also carries the `rake-unstable` build (the `unstable`
+feature is a functional no-op — it only toggles nightly-only lint gates).
+`rake-unstable` conflicts with `rake`, so only one can be installed at a time.
+
+#### From a downloaded `.deb`
+
+Pre-built `.deb` packages are also attached to each
+[GitHub release](https://github.com/rustyhorde/cargo-rake/releases) if you prefer
+not to add the repository. `dpkg -i` runs as root and works from any location:
+
+```bash
+sudo dpkg -i rake_*_amd64.deb
+```
+
+### Fedora/RHEL (`rake`)
+
+#### From the dnf repository (recommended)
+
+Pre-built `.rpm` packages for `x86_64` and `aarch64` are served from the signed
+dnf repository at <https://rustyhorde.github.io/cargo-rake-packages/>, so
+`dnf upgrade` keeps `rake` current:
+
+```bash
+# Add the repository (imports the signing key on first install)
+sudo dnf config-manager \
+    --add-repo https://rustyhorde.github.io/cargo-rake-packages/rpm/rake.repo
+
+# Install
+sudo dnf install rake
+```
+
+> On older releases the subcommand is `sudo dnf config-manager addrepo
+> --from-repofile=…`, and on dnf 4 you may need `sudo dnf install
+> dnf-plugins-core` first.
+
+The `rake-unstable` build is available from the same repository by name; it
+conflicts with `rake`, so only one can be installed at a time.
+
+#### From a downloaded `.rpm`
+
+`.rpm` files are also attached to each
+[GitHub release](https://github.com/rustyhorde/cargo-rake/releases) for direct
+installation:
+
+```bash
+sudo dnf install ./rake-*.x86_64.rpm   # or: sudo rpm -i rake-*.x86_64.rpm
 ```
 
 ### macOS (`rake`)
 
+Pre-compiled binaries for **Apple Silicon (aarch64)** are published to the
+[`rustyhorde/rake`](https://github.com/rustyhorde/homebrew-rake) Homebrew tap.
+Intel Macs are not currently supported.
+
 ```bash
-brew install rustyhorde/rake/rake
+brew tap rustyhorde/rake
+brew install rake
 ```
 
 ## Rakefile.toml
@@ -52,23 +119,30 @@ A `Rakefile.toml` declares named **targets**. Each target owns an ordered array
 of named **commands** plus an optional `depends_on` list:
 
 ```toml
+# Optional: the Rust toolchain this project targets. When set, both `rake` and
+# `cargo rake` verify/install the channel (via rustup) and pin the run to it.
+# Omit it to use whatever toolchain is already active.
+# toolchain = "stable"            # default: unset (active toolchain)
+
 [target.build]
 
 [[target.build.command]]
-name = "compile"
-cmd = ["cargo", "build", "--all-features"]
+name = "compile"                  # label shown in --list and errors (required)
+cmd  = ["cargo", "build", "--all-features"]   # program + args, spawned directly (required)
+# skip_on_error = false           # default: a non-zero exit aborts the target
 
 [target.all]
-depends_on = ["build"]
+depends_on = ["build"]            # default: [] — run these targets first, in order
+# tools     = []                  # default: [] — external tools to ensure (see below)
 
 [[target.all.command]]
 name = "release"
-cmd = ["cargo", "build", "--release"]
+cmd  = ["cargo", "build", "--release"]
 
 [[target.all.command]]
 name = "test"
-cmd = ["cargo", "test"]
-skip_on_error = true
+cmd  = ["cargo", "test"]
+skip_on_error = true              # tolerate a failure and keep going
 ```
 
 - **`cmd`** is a program followed by its arguments. It is spawned directly — no

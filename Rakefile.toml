@@ -14,8 +14,8 @@
 #                          # "nightly-2024-01-01"). Omitted here so this repo's
 #                          # runs use the active toolchain.
 #
-#   [tool.<name>]          # OPTIONAL table of external tools (cargo subcommands,
-#                          # etc.) that targets can reference by name.
+#   [tool.cargo.<name>]    # OPTIONAL table of cargo-installable tools (cargo
+#                          # subcommands, etc.) that targets reference by name.
 #     crate        = "..." # crates.io name; required when update = true.
 #     check        = [...] # REQUIRED. Presence probe; zero exit = installed.
 #                          # For a cargo subcommand use ["cargo", "<sub>",
@@ -24,6 +24,15 @@
 #     update       = false # default. When true, compare the installed version
 #                          # against semver_check and reinstall if newer.
 #     semver_check = "crates-io"  # default (and only mode today).
+#
+#   [tool.os.<name>]       # OPTIONAL table of OS-level dependencies (docker,
+#                          # pkg-config, …) that rake cannot `cargo install`.
+#                          # No update support. Tool names share one flat
+#                          # reference namespace with [tool.cargo.*].
+#     check   = [...]      # REQUIRED. Presence probe; zero exit = installed.
+#     install = [...]      # OPTIONAL. Run when absent; if omitted, an absent
+#                          # tool aborts the run with the requirement below.
+#     hint    = "..."      # OPTIONAL. Shown when absent and no install is set.
 #
 #   [target.<name>]
 #     depends_on = []      # default. Targets to run first, in order.
@@ -39,24 +48,29 @@
 # =============================================================================
 # toolchain = "stable"
 
-[tool.matrix]
+[tool.cargo.matrix]
 crate = "cargo-matrix"
 check = ["cargo", "matrix", "--version"]
 install = ["cargo", "install", "cargo-matrix", "--force", "--locked"]
-update = true                     # default: false
+update = true                                                         # default: false
 # semver_check = "crates-io"      # default (and only mode today)
 
-[tool.nextest]
+[tool.cargo.nextest]
 crate = "cargo-nextest"
 check = ["cargo", "nextest", "--version"]
 install = ["cargo", "install", "cargo-nextest", "--force", "--locked"]
 update = true
 
-[tool.llvm-cov]
+[tool.cargo.llvm-cov]
 crate = "cargo-llvm-cov"
 check = ["cargo", "llvm-cov", "--version"]
 install = ["cargo", "install", "cargo-llvm-cov", "--force", "--locked"]
 update = true
+
+# Example OS-level dependency
+[tool.os.docker]
+check = ["docker", "--version"]
+hint = "install Docker: https://docs.docker.com/get-docker/"
 
 [[target.pull.command]]
 name = "pull"
@@ -104,7 +118,15 @@ tools = ["llvm-cov", "matrix", "nextest"]
 depends_on = ["test"]
 [[target.coverage.command]]
 name = "coverage"
-cmd = ["cargo", "matrix", "-F", "unstable", "llvm-cov", "nextest", "--no-report"]
+cmd = [
+    "cargo",
+    "matrix",
+    "-F",
+    "unstable",
+    "llvm-cov",
+    "nextest",
+    "--no-report",
+]
 
 [[target.coverage.command]]
 name = "lcov.info"
@@ -128,6 +150,27 @@ cmd = ["cargo", "clean"]
 name = "rm lcov.info"
 cmd = ["rm", "lcov.info"]
 
+[target.musl]
+tools = ["docker"]
+[[target.musl.command]]
+name = "musl"
+cmd = [
+    "docker",
+    "run",
+    "-v",
+    "cargo-cache:/root/.cargo/registry",
+    "-v",
+    "(pwd):/home/rust/src",
+    "-v",
+    "~/.gitconfig:/root/.gitconfig:ro",
+    "--rm",
+    "-t",
+    "blackdex/rust-musl:x86_64-musl-nightly",
+    "cargo",
+    "build",
+    "--release",
+]
+
 [target.puc]
 depends_on = ["pull", "clean", "update"]
 
@@ -135,7 +178,7 @@ depends_on = ["pull", "clean", "update"]
 depends_on = ["fmt", "clippy", "build", "test", "coverage"]
 
 [target.all]
-depends_on = ["fmt", "clippy", "build", "test", "coverage", "install", "clean"]
+depends_on = ["fmt", "clippy", "build", "test", "coverage", "install", "musl", "clean"]
 
 [target.default]
 depends_on = ["most"]

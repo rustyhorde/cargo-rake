@@ -159,16 +159,24 @@ skip_on_error = true              # tolerate a failure and keep going
 
 ### Tools
 
-A target can declare external tools (cargo subcommands and the like) it depends
-on. Tools are defined once in a top-level `[tool.<name>]` table and referenced
-by name from a target's `tools` list:
+A target can declare external tools it depends on. Tools are defined once in a
+top-level `[tool]` table, split into two categories — **`[tool.cargo.<name>]`**
+for cargo-installable tools (cargo subcommands and the like) and
+**`[tool.os.<name>]`** for OS-level dependencies (`docker`, `pkg-config`, …)
+that `rake` cannot `cargo install`. A target references either kind by name from
+its `tools` list (the two categories share one flat reference namespace, so a
+name must be unique across them):
 
 ```toml
-[tool.matrix]
+[tool.cargo.matrix]
 crate   = "cargo-matrix"                       # crates.io name (for the update check)
 check   = ["cargo-matrix", "--version"]        # presence probe (zero exit = installed)
 install = ["cargo", "install", "cargo-matrix"] # run when missing or out of date
 update  = false                                # default; see below
+
+[tool.os.docker]
+check   = ["docker", "--version"]              # presence probe (zero exit = installed)
+hint    = "install Docker: https://docs.docker.com/get-docker/"  # shown if absent
 
 [target.clippy]
 tools = ["matrix"]
@@ -178,14 +186,21 @@ name = "clippy"
 cmd  = ["cargo", "matrix", "clippy", "--all-targets", "--", "-Dwarnings"]
 ```
 
-Before a target's commands run, each tool it references is ensured:
+Tools are ensured lazily: a tool's `check` only runs when a target that
+references it is actually run (never at parse time or for unrelated targets), and
+at most once per run. Before a target's commands run, each tool it references is
+ensured:
 
 - The **`check`** command probes whether the tool is already installed: it must
   **exit 0 when the tool is present**. For a cargo subcommand this means
   `["cargo", "<sub>", "--version"]` — the bare `cargo-<sub>` binary rejects
   `--version` and exits non-zero, which would make the tool look perpetually
-  absent. When absent, `rake` prints an `Installing` notice and runs
-  **`install`**.
+  absent.
+
+**Cargo tools** (`[tool.cargo.<name>]`):
+
+- When absent, `rake` prints an `Installing` notice and runs **`install`** (both
+  `check` and `install` are required).
 - **`update`** (default `false`): when `true`, the installed version (parsed
   from `check`'s output) is compared against the latest reported by the tool's
   **`semver_check`** mode and re-installed if a newer one exists. The only mode
@@ -194,6 +209,14 @@ Before a target's commands run, each tool it references is ensured:
   has no parseable version — is non-fatal and keeps the installed version. With
   `update = false`, the already-installed version is used as-is.
 - A failed `install` aborts the run (unlike a tolerated command failure).
+
+**OS tools** (`[tool.os.<name>]`): only `check` is required; there is no update
+support.
+
+- When absent and an **`install`** is declared, `rake` runs it (like a cargo
+  tool). When absent and no `install` is declared, the run **aborts** with a
+  message stating the requirement, plus any **`hint`** — `rake` does not try to
+  install OS dependencies itself.
 
 Each tool is ensured at most once per run, even when several targets reference
 it.

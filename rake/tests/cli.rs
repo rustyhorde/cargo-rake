@@ -232,7 +232,7 @@ fn depends_only_target_runs_dependencies() -> TestResult {
 /// A target whose tool is reported absent (`check` is `false`) and whose
 /// `install` is a portable no-op (`true`), so the run installs then proceeds.
 const NEEDS_TOOL: &str = r#"
-[tool.widget]
+[tool.cargo.widget]
 check = ["false"]
 install = ["true"]
 

@@ -3,10 +3,11 @@
 //! A `Rakefile.toml` declares named targets at the top level, each with an
 //! ordered array of named commands (every command has a `cmd` to run and an
 //! optional `skip_on_error` flag), an optional `depends_on` list, and an
-//! optional `tools` list naming entries in a top-level `[tool.<name>]` table.
+//! optional `tools` list naming entries in a top-level `[tool]` table (split
+//! into `[tool.cargo.<name>]` and `[tool.os.<name>]`, see [`ToolTable`]).
 //! Targets are parsed and validated by [`Rakefile`], and run in dependency
 //! order via [`Rakefile::run`]; a target's commands run in array order, after
-//! its referenced [`Tool`]s have been ensured (installed if missing).
+//! its referenced tools have been ensured (installed if missing).
 
 //! librake
 
@@ -265,7 +266,7 @@ pub use crate::{
     rakefile::{
         Command, Rakefile, RunReport, Target, format_duration, print_runtime, print_total_runtime,
     },
-    tool::{SemverCheck, Tool},
+    tool::{CargoTool, OsTool, SemverCheck, ToolTable},
     toolchain::ensure_rust_toolchain,
 };
 

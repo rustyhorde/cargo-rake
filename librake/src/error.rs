@@ -73,7 +73,8 @@ pub enum Error {
         /// The underlying I/O error.
         source: io::Error,
     },
-    /// A target's `tools` listed a name with no matching `[tool.<name>]` entry.
+    /// A target's `tools` listed a name with no matching `[tool.cargo.<name>]`
+    /// or `[tool.os.<name>]` entry.
     #[error("target '{target}' needs unknown tool '{tool}'")]
     UnknownTool {
         /// The target declaring the tool dependency.
@@ -117,6 +118,34 @@ pub enum Error {
         tool: String,
         /// The non-zero exit status of the install command.
         status: ExitStatus,
+    },
+    /// A required OS tool is not installed and declares no `install` command for
+    /// `rake` to run, so the run is aborted with the requirement (and any `hint`).
+    #[error(
+        "{}",
+        match .hint {
+            Some(hint) => format!(
+                "the '{tool}' tool is required but not installed.\n{hint}"
+            ),
+            None => format!(
+                "the '{tool}' tool is required but not installed.\nInstall it and try again."
+            ),
+        }
+    )]
+    RequiredToolMissing {
+        /// The missing OS tool's name.
+        tool: String,
+        /// An optional, tool-supplied hint describing how to install it.
+        hint: Option<String>,
+    },
+    /// A tool name was declared in both the `[tool.cargo]` and `[tool.os]`
+    /// categories; tool reference names share one flat namespace.
+    #[error(
+        "tool '{tool}' is declared in both [tool.cargo] and [tool.os] (tool names must be unique across categories)"
+    )]
+    DuplicateTool {
+        /// The name declared in both categories.
+        tool: String,
     },
     /// A Rust toolchain (cargo) is required to run targets but none is available
     /// — it was not found and installation was declined, impossible (no

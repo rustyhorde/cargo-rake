@@ -15,7 +15,7 @@ use serde::Deserialize;
 use crate::{
     error::{Error, Result},
     graph, tool,
-    tool::Tool,
+    tool::ToolTable,
 };
 
 /// A single named command within a target.
@@ -42,8 +42,9 @@ pub struct Target {
     /// Other targets that must run, in order, before this one.
     #[serde(default)]
     pub depends_on: Vec<String>,
-    /// Names of `[tool.<name>]` entries this target needs; each is ensured
-    /// (installed if missing) before the target's commands run.
+    /// Names of `[tool.cargo.<name>]`/`[tool.os.<name>]` entries this target
+    /// needs; each is ensured (installed if missing) before the target's
+    /// commands run.
     #[serde(default)]
     pub tools: Vec<String>,
 }
@@ -54,7 +55,7 @@ pub struct Rakefile {
     #[serde(rename = "target", default)]
     targets: IndexMap<String, Target>,
     #[serde(rename = "tool", default)]
-    tools: IndexMap<String, Tool>,
+    tools: ToolTable,
     /// The Rust toolchain channel the project requires (`stable`, `beta`,
     /// `nightly`, or any valid rustup toolchain such as `1.89.0`). Optional:
     /// when present, both binaries verify/install and pin the run to it; when
@@ -147,9 +148,9 @@ impl Rakefile {
         &self.targets
     }
 
-    /// The declared tools, in declaration order.
+    /// The declared tools, split into the cargo and os categories.
     #[must_use]
-    pub fn tools(&self) -> &IndexMap<String, Tool> {
+    pub fn tools(&self) -> &ToolTable {
         &self.tools
     }
 
@@ -198,10 +199,8 @@ impl Rakefile {
             };
             // Ensure each referenced tool is available, at most once per run.
             for name in &target.tools {
-                if ensured.insert(name.as_str())
-                    && let Some(t) = self.tools.get(name)
-                {
-                    tool::ensure(name, t)?;
+                if ensured.insert(name.as_str()) {
+                    self.tools.ensure(name)?;
                 }
             }
             let (current, stop) = run_one(step, target)?;
@@ -820,7 +819,7 @@ cmd = ["cargo", "doc"]
     fn run_with_present_tool_succeeds() -> TestResult {
         // The tool's `check` (`true`) reports it present, so `install` (`false`,
         // which would fail) never runs and the target's command still runs.
-        let toml = "[tool.t]\ncheck = [\"true\"]\ninstall = [\"false\"]\n\
+        let toml = "[tool.cargo.t]\ncheck = [\"true\"]\ninstall = [\"false\"]\n\
                     [target.build]\ntools = [\"t\"]\n\
                     [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
         let rakefile = Rakefile::from_toml_str(toml)?;
@@ -836,7 +835,7 @@ cmd = ["cargo", "doc"]
     fn run_with_failing_tool_install_aborts() -> TestResult {
         // The tool is absent (`check` is `false`) and its `install` fails, so the
         // run errors before the target's command runs.
-        let toml = "[tool.t]\ncheck = [\"false\"]\ninstall = [\"false\"]\n\
+        let toml = "[tool.cargo.t]\ncheck = [\"false\"]\ninstall = [\"false\"]\n\
                     [target.build]\ntools = [\"t\"]\n\
                     [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
         let rakefile = Rakefile::from_toml_str(toml)?;
@@ -854,7 +853,7 @@ cmd = ["cargo", "doc"]
         // Both `build` and its dependency `dep` reference the same present tool;
         // ensuring is deduped, so the run completes (and `install`, `false`,
         // never runs even though two targets reference the tool).
-        let toml = "[tool.t]\ncheck = [\"true\"]\ninstall = [\"false\"]\n\
+        let toml = "[tool.cargo.t]\ncheck = [\"true\"]\ninstall = [\"false\"]\n\
                     [target.dep]\ntools = [\"t\"]\n\
                     [[target.dep.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
                     [target.build]\ntools = [\"t\"]\ndepends_on = [\"dep\"]\n\
@@ -866,5 +865,23 @@ cmd = ["cargo", "doc"]
             .ok_or("expected a status")?;
         assert!(status.success());
         Ok(())
+    }
+
+    #[test]
+    fn run_with_missing_os_tool_aborts() -> TestResult {
+        // The os tool is absent (`check` = `false`) and declares no `install`, so
+        // the run aborts with the requirement before the command runs.
+        let toml = "[tool.os.docker]\ncheck = [\"false\"]\nhint = \"install Docker\"\n\
+                    [target.build]\ntools = [\"docker\"]\n\
+                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        match rakefile.run(&["build"]) {
+            Err(Error::RequiredToolMissing { tool, hint }) => {
+                assert_eq!(tool, "docker");
+                assert_eq!(hint.as_deref(), Some("install Docker"));
+                Ok(())
+            }
+            other => Err(format!("expected RequiredToolMissing, got {other:?}").into()),
+        }
     }
 }

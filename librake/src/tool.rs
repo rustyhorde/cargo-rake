@@ -1,15 +1,24 @@
 //! External tool dependencies for targets.
 //!
-//! A `Rakefile.toml` may declare a top-level `[tool.<name>]` table of external
-//! tools (cargo subcommands and the like) that targets reference by name via
-//! their `tools` list. Before a target's commands run, each referenced tool is
-//! [`ensure`]d: its `check` command probes for local presence, and if it is
-//! missing the `install` command is run. When a tool sets `update = true`, the
-//! installed version is compared against the latest reported by its
-//! [`SemverCheck`] mode and re-installed if a newer one exists. Each ensure
-//! announces a `Checking` line and prints an outcome (`Present`, `Up to date`,
-//! `Installing`, or `Updating`), each a right-justified bold-cyan status-label
-//! prefix in the run's shared column, matching the command status lines.
+//! A `Rakefile.toml` may declare a top-level `[tool]` table split into two
+//! categories: **`[tool.cargo.<name>]`** for cargo-installable tools (cargo
+//! subcommands and the like) and **`[tool.os.<name>]`** for OS-level
+//! dependencies (`docker`, `pkg-config`, …) that `rake` cannot `cargo install`.
+//! Both are modelled by [`ToolTable`]; targets reference either kind by name via
+//! their `tools` list (the two categories share one flat reference namespace, so
+//! names must be unique across them).
+//!
+//! Before a target's commands run, each referenced tool is
+//! [`ensure`](ToolTable::ensure)d. A **cargo** tool's `check` command probes for
+//! local presence, and if it is missing the `install` command is run; when it
+//! sets `update = true`, the installed version is compared against the latest
+//! reported by its [`SemverCheck`] mode and re-installed if a newer one exists.
+//! An **os** tool is checked the same way, but if it is absent and declares an
+//! `install` that runs; otherwise the run aborts with the requirement (and any
+//! `hint`). OS tools have no update support. Each ensure announces a `Checking`
+//! line and prints an outcome (`Present`, `Up to date`, `Installing`, or
+//! `Updating`), each a right-justified bold-cyan status-label prefix in the run's
+//! shared column, matching the command status lines.
 
 use std::process::Command as ProcessCommand;
 
@@ -35,9 +44,25 @@ pub enum SemverCheck {
     CratesIo,
 }
 
-/// A single external tool declared in the `[tool.<name>]` table.
+/// The top-level `[tool]` table, split into the two tool categories.
+///
+/// `[tool.cargo.<name>]` entries deserialize into [`cargo`](ToolTable::cargo) and
+/// `[tool.os.<name>]` entries into [`os`](ToolTable::os). The two categories
+/// share one flat reference namespace (a target's `tools` names resolve against
+/// both), so a name must not appear in both — [`validate`] rejects that.
+#[derive(Debug, Default, Deserialize)]
+pub struct ToolTable {
+    /// Cargo-installable tools, declared under `[tool.cargo.<name>]`.
+    #[serde(default)]
+    pub cargo: IndexMap<String, CargoTool>,
+    /// OS-level tool dependencies, declared under `[tool.os.<name>]`.
+    #[serde(default)]
+    pub os: IndexMap<String, OsTool>,
+}
+
+/// A single cargo-installable tool declared in `[tool.cargo.<name>]`.
 #[derive(Debug, Deserialize)]
-pub struct Tool {
+pub struct CargoTool {
     /// The crates.io crate name, used by the [`SemverCheck::CratesIo`] update
     /// check. Required only when `update = true` under that mode.
     #[serde(rename = "crate", default)]
@@ -51,8 +76,8 @@ pub struct Tool {
     #[serde(default)]
     pub install: Vec<String>,
     /// When `true`, compare the installed version against the latest reported by
-    /// [`Tool::semver_check`] and re-install if a newer one exists. Defaults to
-    /// `false` (use whatever is already installed).
+    /// [`CargoTool::semver_check`] and re-install if a newer one exists. Defaults
+    /// to `false` (use whatever is already installed).
     #[serde(default)]
     pub update: bool,
     /// How the `update` check resolves the latest version. Defaults to
@@ -61,20 +86,40 @@ pub struct Tool {
     pub semver_check: SemverCheck,
 }
 
+/// A single OS-level tool dependency declared in `[tool.os.<name>]`.
+///
+/// Unlike a [`CargoTool`], an OS tool has no update support. Its `check` probes
+/// for presence; when absent, a declared `install` is run, otherwise the run
+/// aborts with the requirement and any `hint`.
+#[derive(Debug, Deserialize)]
+pub struct OsTool {
+    /// The command that probes whether the tool is already installed: a zero
+    /// exit means present. Required (validated non-empty).
+    #[serde(default)]
+    pub check: Vec<String>,
+    /// An optional command to install the tool when it is absent. When empty, an
+    /// absent tool aborts the run with the requirement instead.
+    #[serde(default)]
+    pub install: Vec<String>,
+    /// An optional message describing how to install the tool, shown when it is
+    /// absent and no `install` is declared.
+    #[serde(default)]
+    pub hint: Option<String>,
+}
+
 /// Validate the tool table and every target's `tools` references.
 ///
-/// Each tool's `check` and `install` must be non-empty, and a tool with
+/// Each cargo tool's `check` and `install` must be non-empty, and one with
 /// `update = true` under the `crates-io` semver check must declare a `crate`.
-/// Every `tools` entry on a target must name a tool in the table.
+/// Each os tool's `check` must be non-empty. A tool name must not appear in both
+/// categories, and every `tools` entry on a target must name a tool in either
+/// category.
 ///
 /// # Errors
-/// Returns [`Error::EmptyToolCommand`], [`Error::ToolUpdateMissingCrate`], or
-/// [`Error::UnknownTool`] as appropriate.
-pub(crate) fn validate(
-    tools: &IndexMap<String, Tool>,
-    targets: &IndexMap<String, Target>,
-) -> Result<()> {
-    for (name, tool) in tools {
+/// Returns [`Error::EmptyToolCommand`], [`Error::ToolUpdateMissingCrate`],
+/// [`Error::DuplicateTool`], or [`Error::UnknownTool`] as appropriate.
+pub(crate) fn validate(tools: &ToolTable, targets: &IndexMap<String, Target>) -> Result<()> {
+    for (name, tool) in &tools.cargo {
         if tool.check.is_empty() {
             return Err(Error::EmptyToolCommand {
                 tool: name.clone(),
@@ -98,9 +143,23 @@ pub(crate) fn validate(
         }
     }
 
+    for (name, tool) in &tools.os {
+        if tool.check.is_empty() {
+            return Err(Error::EmptyToolCommand {
+                tool: name.clone(),
+                field: "check",
+            });
+        }
+        // The two categories share one flat reference namespace, so a name in
+        // both is ambiguous.
+        if tools.cargo.contains_key(name) {
+            return Err(Error::DuplicateTool { tool: name.clone() });
+        }
+    }
+
     for (name, target) in targets {
         for tool in &target.tools {
-            if !tools.contains_key(tool) {
+            if !tools.cargo.contains_key(tool) && !tools.os.contains_key(tool) {
                 return Err(Error::UnknownTool {
                     target: name.clone(),
                     tool: tool.clone(),
@@ -111,7 +170,28 @@ pub(crate) fn validate(
     Ok(())
 }
 
-/// Ensure a single tool is available, installing or updating it as needed.
+impl ToolTable {
+    /// Ensure the tool referenced by `name` is available.
+    ///
+    /// Dispatches by category: a name in [`cargo`](ToolTable::cargo) is handled
+    /// by [`ensure_cargo`], one in [`os`](ToolTable::os) by [`ensure_os`]. A name
+    /// in neither is a silent no-op (references are validated up front by
+    /// [`validate`], so this cannot happen for a validated `Rakefile`).
+    ///
+    /// # Errors
+    /// Propagates the install/requirement errors of the dispatched ensure.
+    pub(crate) fn ensure(&self, name: &str) -> Result<()> {
+        if let Some(tool) = self.cargo.get(name) {
+            ensure_cargo(name, tool)
+        } else if let Some(tool) = self.os.get(name) {
+            ensure_os(name, tool)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Ensure a single cargo tool is available, installing or updating it as needed.
 ///
 /// Announces the check (a `Checking` line), then runs the tool's `check`
 /// command (capturing its output) to detect presence, and prints an outcome
@@ -129,7 +209,7 @@ pub(crate) fn validate(
 /// caught by [`validate`]), or [`Error::ToolInstallSpawn`] /
 /// [`Error::ToolInstallFailed`] if the install command cannot be launched or
 /// exits non-zero.
-pub(crate) fn ensure(name: &str, tool: &Tool) -> Result<()> {
+fn ensure_cargo(name: &str, tool: &CargoTool) -> Result<()> {
     let Some((program, args)) = tool.check.split_first() else {
         return Err(Error::EmptyToolCommand {
             tool: name.to_string(),
@@ -143,7 +223,7 @@ pub(crate) fn ensure(name: &str, tool: &Tool) -> Result<()> {
 
     if !present {
         eprint_tool("Installing", name, &tool.install);
-        return run_install(name, tool);
+        return run_install(name, &tool.install);
     }
 
     let installed = output
@@ -161,6 +241,46 @@ pub(crate) fn ensure(name: &str, tool: &Tool) -> Result<()> {
     Ok(())
 }
 
+/// Ensure a single OS tool is available.
+///
+/// Announces the check (a `Checking` line) and runs `check` to detect presence.
+/// When present, prints a `Present` line. When absent: if the tool declares an
+/// `install`, prints an `Installing` notice and runs it (like a cargo tool);
+/// otherwise the run aborts with [`Error::RequiredToolMissing`], stating the
+/// requirement and any `hint`.
+///
+/// # Errors
+/// Returns [`Error::EmptyToolCommand`] if `check` is empty (normally caught by
+/// [`validate`]), [`Error::RequiredToolMissing`] when the tool is absent and has
+/// no `install`, or [`Error::ToolInstallSpawn`] / [`Error::ToolInstallFailed`]
+/// if a declared install cannot be launched or exits non-zero.
+fn ensure_os(name: &str, tool: &OsTool) -> Result<()> {
+    let Some((program, args)) = tool.check.split_first() else {
+        return Err(Error::EmptyToolCommand {
+            tool: name.to_string(),
+            field: "check",
+        });
+    };
+
+    eprint_tool("Checking", name, &[]);
+    let output = ProcessCommand::new(program).args(args).output();
+    let present = output.as_ref().is_ok_and(|o| o.status.success());
+
+    if present {
+        eprint_tool("Present", name, &[]);
+        return Ok(());
+    }
+
+    if tool.install.is_empty() {
+        return Err(Error::RequiredToolMissing {
+            tool: name.to_string(),
+            hint: tool.hint.clone(),
+        });
+    }
+    eprint_tool("Installing", name, &tool.install);
+    run_install(name, &tool.install)
+}
+
 /// Parse the installed version from a `check` command's captured output. Both
 /// stdout and stderr are searched, since `--version` lands on stderr for some
 /// tools (notably cargo subcommands invoked as `cargo <sub> --version`).
@@ -171,7 +291,7 @@ fn parse_installed_version(stdout: &[u8], stderr: &[u8]) -> Option<Version> {
 
 /// When `update = true`, re-install the tool if [`latest_version`] reports a
 /// version newer than `installed`. Version-check failures are non-fatal.
-fn update_if_newer(name: &str, tool: &Tool, installed: Option<&Version>) -> Result<()> {
+fn update_if_newer(name: &str, tool: &CargoTool, installed: Option<&Version>) -> Result<()> {
     // Without a parseable installed version there is nothing to compare against,
     // and reinstalling on every run is worse than keeping the current one — so
     // skip the update (and the registry lookup) entirely.
@@ -197,15 +317,16 @@ fn update_if_newer(name: &str, tool: &Tool, installed: Option<&Version>) -> Resu
     };
     if latest > *installed {
         eprint_tool("Updating", name, &[format!("{installed} -> {latest}")]);
-        return run_install(name, tool);
+        return run_install(name, &tool.install);
     }
     eprint_tool("Up to date", name, &[installed.to_string()]);
     Ok(())
 }
 
 /// Run a tool's `install` command, inheriting stdio so its progress is visible.
-fn run_install(name: &str, tool: &Tool) -> Result<()> {
-    let Some((program, args)) = tool.install.split_first() else {
+/// Shared by cargo and os tools, so it takes the `install` slice directly.
+fn run_install(name: &str, install: &[String]) -> Result<()> {
+    let Some((program, args)) = install.split_first() else {
         return Err(Error::EmptyToolCommand {
             tool: name.to_string(),
             field: "install",
@@ -234,7 +355,7 @@ fn run_install(name: &str, tool: &Tool) -> Result<()> {
 /// Returns `Ok(None)` when no version could be determined (e.g. the registry
 /// reports none). The `Err` carries a human-readable message for a non-fatal
 /// warning — a failed lookup must not abort a run.
-fn latest_version(tool: &Tool) -> core::result::Result<Option<Version>, String> {
+fn latest_version(tool: &CargoTool) -> core::result::Result<Option<Version>, String> {
     match tool.semver_check {
         SemverCheck::CratesIo => {
             let crate_name = tool
@@ -318,17 +439,16 @@ fn eprint_tool(label: &str, name: &str, detail: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CratesIoCrate, CratesIoResponse, SemverCheck, Tool, ensure, parse_version_token,
-        pick_version, validate,
+        CargoTool, CratesIoCrate, CratesIoResponse, OsTool, SemverCheck, ToolTable, ensure_cargo,
+        ensure_os, parse_version_token, pick_version, validate,
     };
     use crate::{error::Error, rakefile::Rakefile};
-    use indexmap::IndexMap;
     use semver::Version;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     const SAMPLE: &str = r#"
-[tool.matrix]
+[tool.cargo.matrix]
 crate = "cargo-matrix"
 check = ["cargo-matrix", "--version"]
 install = ["cargo", "install", "cargo-matrix"]
@@ -345,6 +465,7 @@ cmd = ["cargo", "matrix", "build"]
         let rakefile = Rakefile::from_toml_str(SAMPLE)?;
         let tool = rakefile
             .tools()
+            .cargo
             .get("matrix")
             .ok_or("expected a 'matrix' tool")?;
         assert_eq!(tool.crate_name.as_deref(), Some("cargo-matrix"));
@@ -360,10 +481,14 @@ cmd = ["cargo", "matrix", "build"]
 
     #[test]
     fn explicit_crates_io_semver_check_parses() -> TestResult {
-        let toml = "[tool.x]\ncheck = [\"x\", \"-V\"]\ninstall = [\"cargo\", \"install\", \"x\"]\n\
+        let toml = "[tool.cargo.x]\ncheck = [\"x\", \"-V\"]\ninstall = [\"cargo\", \"install\", \"x\"]\n\
                     update = true\ncrate = \"x\"\nsemver_check = \"crates-io\"\n";
         let rakefile = Rakefile::from_toml_str(toml)?;
-        let entry = rakefile.tools().get("x").ok_or("expected an 'x' tool")?;
+        let entry = rakefile
+            .tools()
+            .cargo
+            .get("x")
+            .ok_or("expected an 'x' tool")?;
         assert!(entry.update);
         assert!(matches!(entry.semver_check, SemverCheck::CratesIo));
         Ok(())
@@ -385,7 +510,7 @@ cmd = ["cargo", "matrix", "build"]
 
     #[test]
     fn empty_check_is_rejected() -> TestResult {
-        let toml = "[tool.x]\ncheck = []\ninstall = [\"cargo\", \"install\", \"x\"]\n";
+        let toml = "[tool.cargo.x]\ncheck = []\ninstall = [\"cargo\", \"install\", \"x\"]\n";
         match Rakefile::from_toml_str(toml) {
             Err(Error::EmptyToolCommand { tool, field }) => {
                 assert_eq!(tool, "x");
@@ -398,7 +523,7 @@ cmd = ["cargo", "matrix", "build"]
 
     #[test]
     fn empty_install_is_rejected() -> TestResult {
-        let toml = "[tool.x]\ncheck = [\"x\", \"-V\"]\ninstall = []\n";
+        let toml = "[tool.cargo.x]\ncheck = [\"x\", \"-V\"]\ninstall = []\n";
         match Rakefile::from_toml_str(toml) {
             Err(Error::EmptyToolCommand { tool, field }) => {
                 assert_eq!(tool, "x");
@@ -411,7 +536,7 @@ cmd = ["cargo", "matrix", "build"]
 
     #[test]
     fn update_without_crate_is_rejected() -> TestResult {
-        let toml = "[tool.x]\ncheck = [\"x\", \"-V\"]\ninstall = [\"cargo\", \"install\", \"x\"]\n\
+        let toml = "[tool.cargo.x]\ncheck = [\"x\", \"-V\"]\ninstall = [\"cargo\", \"install\", \"x\"]\n\
                     update = true\n";
         match Rakefile::from_toml_str(toml) {
             Err(Error::ToolUpdateMissingCrate { tool }) => {
@@ -460,9 +585,9 @@ cmd = ["cargo", "matrix", "build"]
         assert_eq!(super::parse_installed_version(b"", b"no version"), None);
     }
 
-    /// Build a one-tool table for the `ensure` tests.
-    fn tool(check: &[&str], install: &[&str]) -> Tool {
-        Tool {
+    /// Build a one-tool [`CargoTool`] for the `ensure_cargo` tests.
+    fn tool(check: &[&str], install: &[&str]) -> CargoTool {
+        CargoTool {
             crate_name: None,
             check: check.iter().map(|s| (*s).to_string()).collect(),
             install: install.iter().map(|s| (*s).to_string()).collect(),
@@ -471,18 +596,68 @@ cmd = ["cargo", "matrix", "build"]
         }
     }
 
+    /// Build a one-tool [`OsTool`] for the `ensure_os` tests.
+    fn os_tool(check: &[&str], install: &[&str], hint: Option<&str>) -> OsTool {
+        OsTool {
+            check: check.iter().map(|s| (*s).to_string()).collect(),
+            install: install.iter().map(|s| (*s).to_string()).collect(),
+            hint: hint.map(str::to_string),
+        }
+    }
+
     #[test]
     fn ensure_present_tool_skips_install() -> TestResult {
         // `check` succeeds, so `install` (which would fail) must not run.
-        ensure("present", &tool(&["true"], &["false"]))?;
+        ensure_cargo("present", &tool(&["true"], &["false"]))?;
         Ok(())
     }
 
     #[test]
     fn ensure_absent_tool_installs() -> TestResult {
         // `check` fails (absent) so `install` runs and succeeds.
-        ensure("absent", &tool(&["false"], &["true"]))?;
+        ensure_cargo("absent", &tool(&["false"], &["true"]))?;
         Ok(())
+    }
+
+    #[test]
+    fn ensure_os_present_tool_is_ok() -> TestResult {
+        // `check` succeeds, so a missing `install` is fine and no error fires.
+        ensure_os("present", &os_tool(&["true"], &[], None))?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_os_absent_with_install_runs_it() -> TestResult {
+        // Absent (`check` = `false`), but a declared `install` (`true`) runs and
+        // succeeds.
+        ensure_os("absent", &os_tool(&["false"], &["true"], None))?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_os_absent_without_install_is_required_error() -> TestResult {
+        // Absent and no `install`: abort with the requirement, carrying the hint.
+        match ensure_os("docker", &os_tool(&["false"], &[], Some("install Docker"))) {
+            Err(Error::RequiredToolMissing { tool, hint }) => {
+                assert_eq!(tool, "docker");
+                assert_eq!(hint.as_deref(), Some("install Docker"));
+                Ok(())
+            }
+            other => Err(format!("expected RequiredToolMissing, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn ensure_os_absent_install_failure_is_error() -> TestResult {
+        // Absent with a declared `install` that fails (`false`) aborts the run.
+        match ensure_os("absent", &os_tool(&["false"], &["false"], None)) {
+            Err(Error::ToolInstallFailed { tool, status }) => {
+                assert_eq!(tool, "absent");
+                assert!(!status.success());
+                Ok(())
+            }
+            other => Err(format!("expected ToolInstallFailed, got {other:?}").into()),
+        }
     }
 
     #[test]
@@ -495,13 +670,13 @@ cmd = ["cargo", "matrix", "build"]
         let mut tool = tool(&["true"], &["false"]);
         tool.update = true;
         tool.crate_name = Some("anything".to_string());
-        ensure("present-no-version", &tool)?;
+        ensure_cargo("present-no-version", &tool)?;
         Ok(())
     }
 
     #[test]
     fn ensure_install_failure_is_error() -> TestResult {
-        match ensure("absent", &tool(&["false"], &["false"])) {
+        match ensure_cargo("absent", &tool(&["false"], &["false"])) {
             Err(Error::ToolInstallFailed { tool, status }) => {
                 assert_eq!(tool, "absent");
                 assert!(!status.success());
@@ -513,7 +688,7 @@ cmd = ["cargo", "matrix", "build"]
 
     #[test]
     fn ensure_install_spawn_failure_is_error() -> TestResult {
-        match ensure(
+        match ensure_cargo(
             "absent",
             &tool(&["false"], &["this-program-does-not-exist-cargo-rake"]),
         ) {
@@ -568,13 +743,59 @@ cmd = ["cargo", "matrix", "build"]
         Ok(())
     }
 
-    /// `validate` is exercised directly here over a hand-built map to keep its
+    /// `validate` is exercised directly here over a hand-built table to keep its
     /// signature used even though `Rakefile::validate` is the normal entry point.
     #[test]
     fn validate_over_empty_maps_is_ok() -> TestResult {
-        let tools: IndexMap<String, Tool> = IndexMap::new();
-        let targets = IndexMap::new();
+        let tools = ToolTable::default();
+        let targets = indexmap::IndexMap::new();
         validate(&tools, &targets)?;
         Ok(())
+    }
+
+    #[test]
+    fn os_tool_parses_and_validates() -> TestResult {
+        let toml = "[tool.os.docker]\ncheck = [\"docker\", \"--version\"]\n\
+                    hint = \"install Docker\"\n\
+                    [target.build]\ntools = [\"docker\"]\n\
+                    [[target.build.command]]\nname = \"b\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let docker = rakefile
+            .tools()
+            .os
+            .get("docker")
+            .ok_or("expected a 'docker' os tool")?;
+        assert_eq!(docker.check, vec!["docker", "--version"]);
+        assert_eq!(docker.hint.as_deref(), Some("install Docker"));
+        assert!(docker.install.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn os_tool_empty_check_is_rejected() -> TestResult {
+        let toml = "[tool.os.docker]\ncheck = []\n\
+                    [target.build]\ntools = [\"docker\"]\n\
+                    [[target.build.command]]\nname = \"b\"\ncmd = [\"true\"]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::EmptyToolCommand { tool, field }) => {
+                assert_eq!(tool, "docker");
+                assert_eq!(field, "check");
+                Ok(())
+            }
+            other => Err(format!("expected EmptyToolCommand, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn name_in_both_categories_is_rejected() -> TestResult {
+        let toml = "[tool.cargo.x]\ncheck = [\"x\", \"-V\"]\ninstall = [\"cargo\", \"install\", \"x\"]\n\
+                    [tool.os.x]\ncheck = [\"x\", \"-V\"]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::DuplicateTool { tool }) => {
+                assert_eq!(tool, "x");
+                Ok(())
+            }
+            other => Err(format!("expected DuplicateTool, got {other:?}").into()),
+        }
     }
 }

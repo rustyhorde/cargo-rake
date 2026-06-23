@@ -235,7 +235,7 @@ fn depends_only_target_runs_dependencies() -> TestResult {
 /// A target whose tool is reported absent (`check` is `false`) and whose
 /// `install` is a portable no-op (`true`), so the run installs then proceeds.
 const NEEDS_TOOL: &str = r#"
-[tool.widget]
+[tool.cargo.widget]
 check = ["false"]
 install = ["true"]
 
@@ -257,6 +257,38 @@ fn missing_tool_is_installed_before_target() -> TestResult {
         // The install notice is printed to stderr: the right-justified
         // "Installing" prefix followed by the "[ rake ]" tag and the tool name.
         .stderr(predicate::str::contains("Installing [ rake ] widget"));
+    Ok(())
+}
+
+/// An os tool reported absent (`check` is `false`) with no `install`, so the run
+/// aborts before the command with the requirement message and the `hint`.
+const NEEDS_OS_TOOL: &str = r#"
+[tool.os.widget]
+check = ["false"]
+hint = "install widget from your package manager"
+
+[target.build]
+tools = ["widget"]
+[[target.build.command]]
+name = "say"
+cmd = ["echo", "should not run"]
+"#;
+
+#[test]
+fn missing_required_os_tool_aborts() -> TestResult {
+    let dir = rakefile_dir(NEEDS_OS_TOOL)?;
+    cargo_rake(&dir)?
+        .arg("build")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("should not run").not())
+        .stderr(predicate::str::contains(
+            "the 'widget' tool is required but not installed",
+        ))
+        .stderr(predicate::str::contains(
+            "install widget from your package manager",
+        ));
     Ok(())
 }
 

@@ -12,3 +12,6 @@ anyhow = { workspace = true }
 clap_complete = { workspace = true }
 clap_mangen = { workspace = true }
 librake = { workspace = true }
+
+[package.metadata.cargo-matrix]
+skip-package = true

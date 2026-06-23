@@ -1,0 +1,13 @@
+# `cross` configuration for the static MUSL release builds (see
+# .github/workflows/release.yml). cargo-rake's only native-code dependency is
+# `ring` (via `ureq`/`rustls`), which builds on cross's stock MUSL images, so we
+# only pin the images and pass through the env that `build.rs` (vergen-gix) needs
+# for a reproducible `--version` string.
+[build.env]
+passthrough = ["VERGEN_IDEMPOTENT", "CARGO_TERM_COLOR"]
+
+[target.x86_64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:main"
+
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"

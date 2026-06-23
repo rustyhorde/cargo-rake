@@ -4,6 +4,48 @@ A configuration-driven build tool that runs named targets declared in a
 `Rakefile.toml`, in dependency order. It ships as both a `cargo` subcommand
 (`cargo rake`) and a standalone `rake` binary.
 
+## Installation
+
+The two binaries are distributed through different channels:
+
+- **`cargo-rake`** (the `cargo rake` subcommand) — through cargo.
+- **`rake`** (the standalone binary) — through system package managers.
+
+### cargo (`cargo-rake`)
+
+```bash
+cargo binstall cargo-rake   # download a pre-built binary, no compile
+cargo install cargo-rake    # build and install from crates.io
+```
+
+### Arch Linux (`rake`)
+
+Available from the AUR in four mutually-exclusive flavors — pre-built or
+built-from-source, each in a stable and a nightly `unstable`-feature variant:
+
+```bash
+paru -S rake-bin            # pre-built binary (recommended)
+paru -S rake-unstable-bin   # pre-built, nightly unstable build
+paru -S rake                # build from source
+paru -S rake-unstable       # build from source, nightly unstable build
+```
+
+### Debian/Ubuntu and Fedora/RHEL (`rake`)
+
+Download the `.deb` or `.rpm` for your architecture from the
+[latest release](https://github.com/rustyhorde/cargo-rake/releases/latest):
+
+```bash
+sudo dpkg -i rake_*_amd64.deb     # Debian/Ubuntu
+sudo rpm -i rake-*.x86_64.rpm     # Fedora/RHEL
+```
+
+### macOS (`rake`)
+
+```bash
+brew install rustyhorde/rake/rake
+```
+
 ## Rakefile.toml
 
 A `Rakefile.toml` declares named **targets**. Each target owns an ordered array

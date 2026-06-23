@@ -86,7 +86,8 @@ impl Rakefile {
     /// # Errors
     /// Returns [`Error::Parse`] if `s` is not valid TOML, or
     /// [`Error::EmptyTarget`] (a target with neither commands nor dependencies)
-    /// / [`Error::EmptyCmd`] / [`Error::UnknownDependency`] /
+    /// / [`Error::EmptyCmd`] / [`Error::DuplicateCommand`] (two commands in one
+    /// target sharing a `name`) / [`Error::UnknownDependency`] /
     /// [`Error::CircularDependency`] if validation fails.
     pub fn from_toml_str(s: &str) -> Result<Self> {
         let rakefile: Rakefile = toml::from_str(s)?;
@@ -104,9 +105,16 @@ impl Rakefile {
                     target: name.clone(),
                 });
             }
+            let mut seen: HashSet<&str> = HashSet::new();
             for command in &target.commands {
                 if command.cmd.is_empty() {
                     return Err(Error::EmptyCmd {
+                        target: name.clone(),
+                        command: command.name.clone(),
+                    });
+                }
+                if !seen.insert(command.name.as_str()) {
+                    return Err(Error::DuplicateCommand {
                         target: name.clone(),
                         command: command.name.clone(),
                     });
@@ -135,11 +143,13 @@ impl Rakefile {
         self.targets.get(name)
     }
 
-    /// Run `names` (a set of root targets) after their transitive dependencies.
+    /// Run `names` (root targets) after their transitive dependencies.
     ///
-    /// The roots' dependency graphs are merged into a single ordered set:
-    /// targets run in dependency order, each at most once even when shared by
-    /// several roots, and within a target its commands run in array order.
+    /// Each root's dependency graph runs in full, in the order the roots are
+    /// given: targets run in dependency order (each at most once within a single
+    /// root's graph, but once per root when shared across roots), and within a
+    /// target its commands run in array order. Tools, however, are ensured at
+    /// most once for the whole run even when shared across roots.
     /// Execution stops at the first command that exits non-zero, returning that
     /// [`ExitStatus`]; otherwise the final command's status is returned. A
     /// command that sets `skip_on_error` is the exception: a non-zero exit there
@@ -559,6 +569,20 @@ cmd = ["cargo", "doc"]
                 Ok(())
             }
             other => Err(format!("expected EmptyCmd, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn duplicate_command_name_within_target_is_rejected() -> TestResult {
+        let toml = "[[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::DuplicateCommand { target, command }) => {
+                assert_eq!(target, "build");
+                assert_eq!(command, "c");
+                Ok(())
+            }
+            other => Err(format!("expected DuplicateCommand, got {other:?}").into()),
         }
     }
 

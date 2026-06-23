@@ -16,6 +16,14 @@ check = ["cargo", "llvm-cov", "--version"]
 install = ["cargo", "install", "cargo-llvm-cov", "--force", "--locked"]
 update = true
 
+[[target.pull.command]]
+name = "pull"
+cmd = ["git", "pull"]
+
+[[target.update.command]]
+name = "update"
+cmd = ["cargo", "update"]
+
 [[target.fmt.command]]
 name = "fmt"
 cmd = ["cargo", "fmt"]
@@ -72,6 +80,9 @@ cmd = ["cargo", "install", "--path", "cargo-rake", "--force", "--locked"]
 [[target.clean.command]]
 name = "clean"
 cmd = ["cargo", "clean"]
+
+[target.puc]
+depends_on = ["pull", "clean", "update"]
 
 [target.most]
 depends_on = ["fmt", "clippy", "build", "test", "coverage"]

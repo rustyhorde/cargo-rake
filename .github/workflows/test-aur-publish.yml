@@ -1,0 +1,84 @@
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Which AUR package to test
+        type: choice
+        default: rake-bin
+        options:
+          - rake
+          - rake-unstable
+          - rake-bin
+          - rake-unstable-bin
+      dry_run:
+        description: Generate .SRCINFO and validate SSH but do not push
+        type: boolean
+        default: true
+
+name: 🧪 Test AUR Publish 🧪
+
+jobs:
+  test-aur-publish:
+    name: 🧪 Test AUR Publish 🧪
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    permissions:
+      contents: read
+    steps:
+      - name: 🧰 Install tooling 🧰
+        run: pacman -Syu --noconfirm base-devel pacman-contrib git sudo openssh
+
+      - name: ✅ Checkout ✅
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: 📝 Generate .SRCINFO 📝
+        run: |
+          set -euo pipefail
+          pkg="${{ inputs.package }}"
+          useradd -m builder
+          chown -R builder:builder .
+          cd "packaging/arch/${pkg}"
+          sudo -u builder makepkg --printsrcinfo > .SRCINFO
+          echo "----- .SRCINFO -----"
+          cat .SRCINFO
+
+      - name: 🔐 Configure SSH 🔐
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          cat > ~/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+            User aur
+            IdentityFile ~/.ssh/aur
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+          EOF
+          ssh-keyscan -t ed25519,rsa aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: 🔎 Validate SSH connectivity 🔎
+        run: |
+          set -euo pipefail
+          # The AUR SSH endpoint answers an interactive `help` command; a clean
+          # response confirms the key is registered with the account.
+          ssh aur@aur.archlinux.org help || true
+
+      - name: 📤 Publish (skipped on dry run) 📤
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          set -euo pipefail
+          pkg="${{ inputs.package }}"
+          git clone "ssh://aur@aur.archlinux.org/${pkg}.git" aur-repo
+          cp "packaging/arch/${pkg}/PKGBUILD" aur-repo/PKGBUILD
+          cp "packaging/arch/${pkg}/.SRCINFO" aur-repo/.SRCINFO
+          cd aur-repo
+          git config user.name "Jason Ozias"
+          git config user.email "jason.g.ozias@gmail.com"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "No changes for ${pkg}; nothing to publish."
+            exit 0
+          fi
+          git commit -m "Test publish of ${pkg}"
+          git push

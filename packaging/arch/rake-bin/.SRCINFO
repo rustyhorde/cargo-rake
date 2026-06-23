@@ -1,0 +1,19 @@
+pkgbase = rake-bin
+	pkgdesc = Configuration-driven build tool that runs Rakefile.toml targets (pre-compiled binary)
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/rustyhorde/cargo-rake
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	license = Apache-2.0
+	provides = rake
+	conflicts = rake
+	source = https://github.com/rustyhorde/cargo-rake/releases/download/v0.1.0/dist-rake.tar.gz
+	sha256sums = SKIP
+	source_x86_64 = rake-x86_64::https://github.com/rustyhorde/cargo-rake/releases/download/v0.1.0/rake-x86_64-unknown-linux-musl
+	sha256sums_x86_64 = SKIP
+	source_aarch64 = rake-aarch64::https://github.com/rustyhorde/cargo-rake/releases/download/v0.1.0/rake-aarch64-unknown-linux-musl
+	sha256sums_aarch64 = SKIP
+
+pkgname = rake-bin

@@ -1,0 +1,58 @@
+# nfpm package configuration for rake-unstable (x86_64, nightly unstable build).
+# Build with: VERSION=<ver> nfpm package --config packaging/nfpm/rake-unstable.yaml --packager deb|rpm --target release-assets/
+name: rake-unstable
+arch: amd64
+version: ${VERSION}
+version_schema: semver
+section: devel
+maintainer: Jason Ozias <jason.g.ozias@gmail.com>
+description: |
+  Configuration-driven build tool that runs named targets declared in a
+  Rakefile.toml, in dependency order. Built from a nightly toolchain with the
+  `unstable` feature enabled.
+homepage: https://github.com/rustyhorde/cargo-rake
+license: MIT OR Apache-2.0
+
+conflicts:
+  - rake
+
+replaces:
+  - rake
+
+provides:
+  - rake
+
+deb:
+  compression: xz
+
+rpm:
+  compression: xz
+
+contents:
+  # Binary
+  - src: rake-unstable-x86_64-unknown-linux-musl
+    dst: /usr/bin/rake
+    file_info:
+      mode: 0755
+
+  # Man page
+  - src: dist/rake/rake.1
+    dst: /usr/share/man/man1/rake.1
+
+  # Shell completions
+  - src: dist/rake/rake.bash
+    dst: /usr/share/bash-completion/completions/rake
+  - src: dist/rake/_rake
+    dst: /usr/share/zsh/vendor-completions/_rake
+  - src: dist/rake/rake.fish
+    dst: /usr/share/fish/vendor_completions.d/rake.fish
+
+  # Example Rakefile
+  - src: dist/rake/Rakefile.toml.example
+    dst: /usr/share/doc/rake-unstable/examples/Rakefile.toml.example
+
+  # Licenses
+  - src: dist/rake/LICENSE-MIT
+    dst: /usr/share/doc/rake-unstable/LICENSE-MIT
+  - src: dist/rake/LICENSE-APACHE
+    dst: /usr/share/doc/rake-unstable/LICENSE-APACHE

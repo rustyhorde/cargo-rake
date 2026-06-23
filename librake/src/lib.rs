@@ -250,6 +250,7 @@
 #![cfg_attr(all(docsrs), feature(doc_cfg))]
 // #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+pub mod cli;
 mod error;
 mod graph;
 mod rakefile;

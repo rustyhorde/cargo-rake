@@ -249,12 +249,12 @@
 
 use std::ffi::OsString;
 use std::io::Cursor;
-use std::path::PathBuf;
 use std::process::exit;
 use std::sync::LazyLock;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::FromArgMatches as _;
+use librake::cli::Cli;
 use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets, print_total_runtime};
 use vergen_pretty::{Pretty, vergen_pretty_env};
 
@@ -277,24 +277,6 @@ static LONG_VERSION: LazyLock<String> = LazyLock::new(|| {
     output
 });
 
-/// A configuration-driven build tool.
-///
-/// Targets are declared in a `Rakefile.toml`. With no target, the `default`
-/// target is run.
-#[derive(Debug, Parser)]
-#[command(name = "cargo-rake", bin_name = "cargo rake", version, long_version = LONG_VERSION.as_str())]
-struct Cli {
-    /// Path to the Rakefile.
-    #[arg(short, long, default_value = "Rakefile.toml")]
-    file: PathBuf,
-    /// List the available targets instead of running one.
-    #[arg(short, long)]
-    list: bool,
-    /// The targets to run (defaults to "default"). Runs the union of their
-    /// dependency graphs, each target at most once.
-    targets: Vec<String>,
-}
-
 fn main() -> Result<()> {
     // Cargo invokes this as `cargo rake ...`, passing argv `[cargo-rake, rake, ...]`.
     // Drop the leading `rake` so the remaining args parse like the `rake` binary.
@@ -302,7 +284,11 @@ fn main() -> Result<()> {
     if args.get(1).is_some_and(|arg| arg == "rake") {
         let _removed = args.remove(1);
     }
-    run(&Cli::parse_from(args))
+    let matches = librake::cli::command("cargo-rake", "cargo rake")
+        .version(env!("CARGO_PKG_VERSION"))
+        .long_version(LONG_VERSION.as_str())
+        .get_matches_from(args);
+    run(&Cli::from_arg_matches(&matches)?)
 }
 
 fn run(cli: &Cli) -> Result<()> {

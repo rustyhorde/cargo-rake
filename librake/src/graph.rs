@@ -83,12 +83,12 @@ fn detect_cycle<'a>(
     Ok(())
 }
 
-/// Compute the merged execution order for `roots`: the union of their
-/// transitive dependency graphs as a single ordered set — each target appears
-/// at most once (dependencies before dependents, declaration order as the
-/// tie-break), with each root after its own dependencies. Roots are seeded in
-/// the order given, so a target shared by several roots runs once, where the
-/// first root that reaches it places it.
+/// Compute the execution order for `roots`: each root's transitive dependency
+/// graph in full, concatenated in the order the roots are given. Within a single
+/// root's graph a target appears at most once (dependencies before dependents,
+/// declaration order as the tie-break, root last); across roots there is no
+/// deduplication, so a target shared by several roots runs once per root — `puc`
+/// then `most` runs all of `puc`'s graph, then all of `most`'s.
 ///
 /// Returns [`Error::UnknownTarget`] if any entry in `roots` is not present;
 /// every root is checked before any ordering happens, so an unknown target
@@ -106,9 +106,11 @@ pub(crate) fn execution_order<'a>(
     }
 
     let mut order: Vec<&'a str> = Vec::new();
-    let mut visited: HashSet<&'a str> = HashSet::new();
-    let mut in_progress: HashSet<&'a str> = HashSet::new();
     for root in roots {
+        // Fresh visited/in_progress per root so each root's whole graph runs;
+        // deduplication is scoped to a single root, not the whole run.
+        let mut visited: HashSet<&'a str> = HashSet::new();
+        let mut in_progress: HashSet<&'a str> = HashSet::new();
         order_visit(targets, root, &mut visited, &mut in_progress, &mut order);
     }
     Ok(order)
@@ -182,8 +184,9 @@ mod tests {
     }
 
     #[test]
-    fn multiple_roots_merge_into_a_set() -> TestResult {
-        // x -> shared, y -> shared. Passing both roots runs `shared` once.
+    fn each_root_runs_its_full_graph() -> TestResult {
+        // x -> shared, y -> shared. Each root runs its whole graph in turn, so
+        // `shared` runs once per root (no cross-root deduplication).
         let targets = graph(&[
             ("x", &["shared"]),
             ("y", &["shared"]),
@@ -192,16 +195,16 @@ mod tests {
         ]);
         validate(&targets)?;
         let order = execution_order(&targets, &["x", "y"])?;
-        assert_eq!(order, vec!["shared", "x", "y"]);
+        assert_eq!(order, vec!["shared", "x", "shared", "y"]);
         Ok(())
     }
 
     #[test]
-    fn duplicate_roots_run_once() -> TestResult {
+    fn duplicate_roots_run_each_time() -> TestResult {
         let targets = graph(&[("a", &[])]);
         validate(&targets)?;
         let order = execution_order(&targets, &["a", "a"])?;
-        assert_eq!(order, vec!["a"]);
+        assert_eq!(order, vec!["a", "a"]);
         Ok(())
     }
 

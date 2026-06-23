@@ -143,11 +143,13 @@ impl Rakefile {
         self.targets.get(name)
     }
 
-    /// Run `names` (a set of root targets) after their transitive dependencies.
+    /// Run `names` (root targets) after their transitive dependencies.
     ///
-    /// The roots' dependency graphs are merged into a single ordered set:
-    /// targets run in dependency order, each at most once even when shared by
-    /// several roots, and within a target its commands run in array order.
+    /// Each root's dependency graph runs in full, in the order the roots are
+    /// given: targets run in dependency order (each at most once within a single
+    /// root's graph, but once per root when shared across roots), and within a
+    /// target its commands run in array order. Tools, however, are ensured at
+    /// most once for the whole run even when shared across roots.
     /// Execution stops at the first command that exits non-zero, returning that
     /// [`ExitStatus`]; otherwise the final command's status is returned. A
     /// command that sets `skip_on_error` is the exception: a non-zero exit there

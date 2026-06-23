@@ -295,7 +295,10 @@ fn set_env(key: &str, value: impl AsRef<OsStr>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{affirmative, ensure_rust_toolchain, toolchain_listed};
+    use super::{
+        Error, ProcessCommand, affirmative, ensure_rust_toolchain, finish_install, present,
+        toolchain_listed,
+    };
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -353,6 +356,31 @@ mod tests {
         // environment (no prompt, no install, no pin).
         ensure_rust_toolchain(None)?;
         Ok(())
+    }
+
+    #[test]
+    fn finish_install_maps_exit_status() -> TestResult {
+        let ok = ProcessCommand::new("true").status()?;
+        match finish_install(ok) {
+            Ok(()) => {}
+            Err(other) => return Err(format!("expected Ok for `true`, got {other:?}").into()),
+        }
+
+        let bad = ProcessCommand::new("false").status()?;
+        match finish_install(bad) {
+            Err(Error::RustInstallFailed { .. }) => {}
+            other => {
+                return Err(format!("expected RustInstallFailed for `false`, got {other:?}").into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn present_covers_both_label_branches() {
+        // Both branches just print a status line; exercise them for coverage.
+        present("stable", true);
+        present("stable", false);
     }
 
     /// The first toolchain name reported by `rustup toolchain list`, or `None`

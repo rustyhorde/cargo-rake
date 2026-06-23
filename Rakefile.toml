@@ -81,6 +81,10 @@ cmd = ["cargo", "install", "--path", "cargo-rake", "--force", "--locked"]
 name = "clean"
 cmd = ["cargo", "clean"]
 
+[[target.clean.command]]
+name = "rm lcov.info"
+cmd = ["rm", "lcov.info"]
+
 [target.puc]
 depends_on = ["pull", "clean", "update"]
 

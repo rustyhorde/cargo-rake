@@ -31,6 +31,16 @@ pub enum Error {
         /// The offending command's name.
         command: String,
     },
+    /// A target declared two commands with the same `name`.
+    #[error(
+        "target '{target}' declares duplicate command name '{command}' (each [[target.{target}.command]] must have a unique name)"
+    )]
+    DuplicateCommand {
+        /// The target that owns the duplicated command name.
+        target: String,
+        /// The command name declared more than once.
+        command: String,
+    },
     /// A target was requested that does not exist in the `Rakefile.toml`.
     #[error("unknown target '{name}'")]
     UnknownTarget {

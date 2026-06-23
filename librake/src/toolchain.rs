@@ -370,7 +370,9 @@ mod tests {
         match finish_install(bad) {
             Err(Error::RustInstallFailed { .. }) => {}
             other => {
-                return Err(format!("expected RustInstallFailed for `false`, got {other:?}").into());
+                return Err(
+                    format!("expected RustInstallFailed for `false`, got {other:?}").into(),
+                );
             }
         }
         Ok(())

@@ -20,10 +20,6 @@ update = true
 name = "pull"
 cmd = ["git", "pull"]
 
-[[target.clean.command]]
-name = "clean"
-cmd = ["cargo", "clean"]
-
 [[target.update.command]]
 name = "update"
 cmd = ["cargo", "update"]

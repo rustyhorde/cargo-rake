@@ -1,15 +1,50 @@
-# The Rust toolchain this project targets. When set, both `rake` and `cargo
-# rake` verify/install the channel (via rustup) and pin the run to it; optional,
-# and omitted here so this repo's runs use the active toolchain. Accepts
-# "stable"/"beta"/"nightly" or any rustup toolchain (e.g. "1.95.0",
-# "nightly-2024-01-01").
+# =============================================================================
+# Rakefile.toml — example / reference
+#
+# A Rakefile declares named *targets*. Each target owns an ordered array of
+# named *commands* and may depend on other targets and on external *tools*.
+# Every option is shown below with its default; commented lines mark optional
+# keys and their defaults.
+#
+#   toolchain = "stable"   # OPTIONAL, default: unset. The Rust toolchain this
+#                          # project targets. When set, both `rake` and `cargo
+#                          # rake` verify/install the channel (via rustup) and
+#                          # pin the run to it. Accepts "stable"/"beta"/"nightly"
+#                          # or any rustup toolchain (e.g. "1.95.0",
+#                          # "nightly-2024-01-01"). Omitted here so this repo's
+#                          # runs use the active toolchain.
+#
+#   [tool.<name>]          # OPTIONAL table of external tools (cargo subcommands,
+#                          # etc.) that targets can reference by name.
+#     crate        = "..." # crates.io name; required when update = true.
+#     check        = [...] # REQUIRED. Presence probe; zero exit = installed.
+#                          # For a cargo subcommand use ["cargo", "<sub>",
+#                          # "--version"] (the bare cargo-<sub> rejects it).
+#     install      = [...] # REQUIRED. Run when the tool is missing/out of date.
+#     update       = false # default. When true, compare the installed version
+#                          # against semver_check and reinstall if newer.
+#     semver_check = "crates-io"  # default (and only mode today).
+#
+#   [target.<name>]
+#     depends_on = []      # default. Targets to run first, in order.
+#     tools      = []      # default. Tool names (from [tool.*]) to ensure first.
+#
+#   [[target.<name>.command]]
+#     name          = "..."   # REQUIRED. Label shown in --list and errors;
+#                             # unique within the target.
+#     cmd           = [...]   # REQUIRED, non-empty. Program + args, spawned
+#                             # directly — no shell.
+#     skip_on_error = false   # default. When true, a non-zero exit is tolerated
+#                             # and the target continues instead of aborting.
+# =============================================================================
 # toolchain = "stable"
 
 [tool.matrix]
 crate = "cargo-matrix"
 check = ["cargo", "matrix", "--version"]
 install = ["cargo", "install", "cargo-matrix", "--force", "--locked"]
-update = true
+update = true                     # default: false
+# semver_check = "crates-io"      # default (and only mode today)
 
 [tool.nextest]
 crate = "cargo-nextest"
@@ -26,6 +61,7 @@ update = true
 [[target.pull.command]]
 name = "pull"
 cmd = ["git", "pull"]
+# skip_on_error = false           # default: a non-zero exit aborts the target
 
 [[target.update.command]]
 name = "update"

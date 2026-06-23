@@ -38,7 +38,7 @@ Four crates, sharing dependency versions via `[workspace.dependencies]`:
 
 `cargo-rake` and `rake` are near-identical clap front-ends, both parsing the shared `librake::cli::Cli` via `librake::cli::command(...)` (layering their own `version`/`long_version`). The only behavioral difference: `cargo-rake::main` strips a leading `rake` argument, because Cargo invokes subcommands as `cargo-rake rake ...`. Keep their `run` logic in sync when changing one; the argument definitions now live only in `librake::cli`.
 
-Packaging/distribution lives in `packaging/` (AUR PKGBUILDs under `arch/`, nfpm DEB/RPM under `nfpm/`, Homebrew template under `homebrew/`) and the `release.yml` / `test-aur-publish.yml` workflows. `cargo-rake` ships via crates.io + `cargo binstall` (`[package.metadata.binstall]`); `rake` ships as four AUR packages (`rake`, `rake-unstable`, `rake-bin`, `rake-unstable-bin`), DEB/RPM, and Homebrew. The `-unstable` variants build on a nightly toolchain with `--features unstable`.
+Packaging/distribution lives in `packaging/` (AUR PKGBUILDs under `arch/`, nfpm DEB/RPM under `nfpm/`, Homebrew template under `homebrew/`) and the `release.yml` / `test-aur-publish.yml` workflows. `cargo-rake` ships via crates.io + `cargo binstall` (`[package.metadata.binstall]`); `rake` ships as four AUR packages (`rake`, `rake-unstable`, `rake-bin`, `rake-unstable-bin`), DEB/RPM, and Homebrew. The `-unstable` variants build with `--features unstable` on the stable toolchain — that feature is a functional no-op (it only toggles nightly-only lint gates), so no nightly toolchain is involved.
 
 ## Conventions
 

@@ -8,8 +8,7 @@ section: devel
 maintainer: Jason Ozias <jason.g.ozias@gmail.com>
 description: |
   Configuration-driven build tool that runs named targets declared in a
-  Rakefile.toml, in dependency order. Built from a nightly toolchain with the
-  `unstable` feature enabled.
+  Rakefile.toml, in dependency order. Built with the `unstable` feature enabled.
 homepage: https://github.com/rustyhorde/cargo-rake
 license: MIT OR Apache-2.0
 

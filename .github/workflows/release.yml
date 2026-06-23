@@ -1,7 +1,8 @@
 on:
   push:
     tags:
-      - "v[0-9]*"
+      - "v[0-9]*"        # full release
+      - "v[0-9]*-rc*"    # pre-release / build test only
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -18,13 +19,16 @@ name: 🚀 Release 🚀
 jobs:
   # --------------------------------------------------------------------------
   # Build the statically-linked Linux binaries (stable + unstable rake, plus
-  # cargo-rake for binstall), the dist sidecar bundle, and the DEB/RPM packages.
+  # cargo-rake for binstall) with cross, the dist sidecar bundle, and the
+  # DEB/RPM packages.
   # --------------------------------------------------------------------------
-  build-linux:
+  build:
     name: 🐧 Build (Linux) 🐧
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      pkgver: ${{ steps.version.outputs.pkgver }}
     steps:
       - name: ✅ Checkout ✅
         uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
@@ -33,78 +37,91 @@ jobs:
           attempt_limit: 3
           attempt_delay: 30000
 
+      - name: 🏷️ Extract version from tag 🏷️
+        id: version
+        run: echo "pkgver=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - name: 🧰 Install Rust (stable) 🧰
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
           toolchain: stable
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
 
-      - name: 🧰 Install Rust (nightly) 🧰
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+      - name: 💾 Install (cargo-binstall) 💾
+        uses: cargo-bins/cargo-binstall@1c2b96c2b86875d56caeec7b7ee9980812daf0d9 # main
+
+      - name: 💾 Install (cross) 💾
+        run: cargo binstall --no-confirm --no-symlinks --no-discover-github-token cross --version 0.2.5
+
+      - name: 📦 Cache cargo registry 📦
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
-          toolchain: nightly
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
-
-      - name: 🛠️ Install cargo-zigbuild 🛠️
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-
-      - name: 📦 Install nfpm 📦
-        run: |
-          set -euo pipefail
-          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
-            | sudo tee /etc/apt/sources.list.d/goreleaser.list
-          sudo apt-get update
-          sudo apt-get install -y nfpm
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: 🔨 Build binaries 🔨
         run: |
           set -euo pipefail
           for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
             # Stable rake
-            cargo +stable zigbuild --release --locked --target "$t" -p rake --bin rake
+            cross build --release --locked --target "$t" -p rake --bin rake
             cp "target/$t/release/rake" "rake-$t"
 
             # cargo-rake (for cargo-binstall)
-            cargo +stable zigbuild --release --locked --target "$t" -p cargo-rake --bin cargo-rake
+            cross build --release --locked --target "$t" -p cargo-rake --bin cargo-rake
             cp "target/$t/release/cargo-rake" "cargo-rake-$t"
 
-            # Unstable rake (nightly toolchain + the `unstable` feature)
-            cargo +nightly zigbuild --release --locked --target "$t" -p rake --bin rake --features unstable
+            # Unstable rake (the `unstable` feature is a functional no-op; it only
+            # toggles nightly-only lint gates, so it builds on the stable toolchain).
+            cross build --release --locked --target "$t" -p rake --bin rake --features unstable
             cp "target/$t/release/rake" "rake-unstable-$t"
           done
 
       - name: 📄 Generate dist sidecars 📄
-        run: cargo +stable run --locked -p xtask -- dist rake
+        run: cargo run --locked -p xtask -- dist rake
 
       - name: 🗜️ Create dist tarball 🗜️
         run: tar -czf dist-rake.tar.gz -C dist rake
 
-      - name: 📦 Build DEB/RPM packages 📦
+      - name: 📦 Install nfpm 📦
         run: |
           set -euo pipefail
-          export VERSION="${GITHUB_REF_NAME#v}"
+          NFPM_VERSION="2.43.0"
+          curl -sSL \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xz -C /usr/local/bin nfpm
+          nfpm --version
+
+      - name: 📦 Build DEB/RPM packages 📦
+        env:
+          VERSION: ${{ steps.version.outputs.pkgver }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
           for cfg in rake rake-aarch64 rake-unstable rake-unstable-aarch64; do
-            nfpm package --config "packaging/nfpm/${cfg}.yaml" --packager deb --target ./
-            nfpm package --config "packaging/nfpm/${cfg}.yaml" --packager rpm --target ./
+            nfpm package --config "packaging/nfpm/${cfg}.yaml" --packager deb --target release-assets/
+            nfpm package --config "packaging/nfpm/${cfg}.yaml" --packager rpm --target release-assets/
           done
 
-      - name: ⬆️ Upload Linux assets ⬆️
-        uses: actions/upload-artifact@v4
+      - name: 📦 Stage release assets 📦
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp rake-x86_64-unknown-linux-musl            release-assets/
+          cp rake-aarch64-unknown-linux-musl           release-assets/
+          cp rake-unstable-x86_64-unknown-linux-musl   release-assets/
+          cp rake-unstable-aarch64-unknown-linux-musl  release-assets/
+          cp cargo-rake-x86_64-unknown-linux-musl      release-assets/
+          cp cargo-rake-aarch64-unknown-linux-musl     release-assets/
+          cp dist-rake.tar.gz                          release-assets/
+
+      - name: ⬆️ Upload release assets ⬆️
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: linux-assets
+          name: release-assets
           if-no-files-found: error
-          path: |
-            rake-x86_64-unknown-linux-musl
-            rake-aarch64-unknown-linux-musl
-            rake-unstable-x86_64-unknown-linux-musl
-            rake-unstable-aarch64-unknown-linux-musl
-            cargo-rake-x86_64-unknown-linux-musl
-            cargo-rake-aarch64-unknown-linux-musl
-            dist-rake.tar.gz
-            *.deb
-            *.rpm
+          path: release-assets/
 
   # --------------------------------------------------------------------------
   # Build the macOS (Apple Silicon) binaries: the Homebrew bundle for rake and
@@ -129,6 +146,14 @@ jobs:
           toolchain: stable
           targets: aarch64-apple-darwin
 
+      - name: 📦 Cache cargo registry 📦
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: macos-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
       - name: 🔨 Build binaries 🔨
         run: |
           set -euo pipefail
@@ -148,45 +173,72 @@ jobs:
           cp target/aarch64-apple-darwin/release/cargo-rake cargo-rake-aarch64-apple-darwin
 
       - name: ⬆️ Upload macOS assets ⬆️
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: macos-assets
+          name: release-assets-macos
           if-no-files-found: error
           path: |
             rake-aarch64-apple-darwin.tar.gz
             cargo-rake-aarch64-apple-darwin
 
   # --------------------------------------------------------------------------
-  # Create the GitHub release and attach every artifact.
+  # Create the GitHub release and attach every artifact. Skipped for -rc tags
+  # (those only exercise the build jobs).
   # --------------------------------------------------------------------------
-  create-release:
+  release:
     name: 🏷️ Create GitHub release 🏷️
-    needs: [build-linux, build-macos]
+    if: "!contains(github.ref_name, '-rc')"
+    needs: [build, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      tarball_sha256: ${{ steps.sha256.outputs.tarball_sha256 }}
     steps:
-      - name: ⬇️ Download assets ⬇️
-        uses: actions/download-artifact@v4
+      - name: ⬇️ Download Linux assets ⬇️
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          path: assets
-          merge-multiple: true
+          name: release-assets
+          path: release-assets/
 
-      - name: 🏷️ Create release 🏷️
+      - name: ⬇️ Download macOS assets ⬇️
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-assets-macos
+          path: release-assets/
+
+      - name: ⬇️ Download source tarball ⬇️
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            assets/*
+          curl -sSL \
+            "https://github.com/${{ github.repository }}/archive/${{ github.ref_name }}.tar.gz" \
+            -o "cargo-rake-${{ needs.build.outputs.pkgver }}.tar.gz"
+
+      - name: 🔢 Compute source tarball sha256 🔢
+        id: sha256
+        run: |
+          set -euo pipefail
+          SHA="$(sha256sum "cargo-rake-${{ needs.build.outputs.pkgver }}.tar.gz" | awk '{print $1}')"
+          echo "tarball_sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: 🏷️ Create release 🏷️
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-assets/*
+            cargo-rake-${{ needs.build.outputs.pkgver }}.tar.gz
 
   # --------------------------------------------------------------------------
   # Publish librake and cargo-rake to crates.io. The `rake` crate name is taken
   # on crates.io by an unrelated crate, so it is never published (publish=false).
+  # Skipped for -rc tags.
   # --------------------------------------------------------------------------
   publish-crates:
     name: 📦 Publish to crates.io 📦
+    if: "!contains(github.ref_name, '-rc')"
+    needs: [build, release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -228,112 +280,14 @@ jobs:
           publish_with_retry cargo-rake
 
   # --------------------------------------------------------------------------
-  # Refresh the PKGBUILD checksums + .SRCINFO against the just-published release
-  # and upload the result for the AUR-publish and in-tree-sync jobs.
+  # Refresh the PKGBUILD checksums + .SRCINFO against the just-published release,
+  # upload them for the AUR-publish job, and open a PR syncing them in-tree.
+  # Skipped for -rc tags.
   # --------------------------------------------------------------------------
   update-pkgbuilds:
     name: 🔄 Update PKGBUILDs 🔄
-    needs: [create-release]
-    runs-on: ubuntu-latest
-    container: archlinux:latest
-    permissions:
-      contents: read
-    steps:
-      - name: 🧰 Install tooling 🧰
-        run: pacman -Syu --noconfirm base-devel pacman-contrib git sudo
-
-      - name: ✅ Checkout ✅
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: 🔄 Refresh checksums and .SRCINFO 🔄
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          # makepkg refuses to run as root; do the work as an unprivileged user.
-          useradd -m builder
-          chown -R builder:builder .
-          for pkg in rake rake-unstable rake-bin rake-unstable-bin; do
-            (
-              cd "packaging/arch/$pkg"
-              sed -i "s/^pkgver=.*/pkgver=${version}/" PKGBUILD
-              sudo -u builder updpkgsums
-              sudo -u builder makepkg --printsrcinfo > .SRCINFO
-            )
-          done
-
-      - name: ⬆️ Upload updated PKGBUILDs ⬆️
-        uses: actions/upload-artifact@v4
-        with:
-          name: aur-packages
-          if-no-files-found: error
-          path: packaging/arch
-
-  # --------------------------------------------------------------------------
-  # Push the refreshed PKGBUILD + .SRCINFO to each AUR package repository.
-  # --------------------------------------------------------------------------
-  aur-publish:
-    name: 📤 Publish to AUR 📤
-    needs: [update-pkgbuilds]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        pkg: [rake, rake-unstable, rake-bin, rake-unstable-bin]
-    steps:
-      - name: ⬇️ Download updated PKGBUILDs ⬇️
-        uses: actions/download-artifact@v4
-        with:
-          name: aur-packages
-          path: packaging/arch
-
-      - name: 🔐 Configure SSH 🔐
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh
-          printf '%s\n' "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          cat > ~/.ssh/config <<'EOF'
-          Host aur.archlinux.org
-            User aur
-            IdentityFile ~/.ssh/aur
-            IdentitiesOnly yes
-            StrictHostKeyChecking accept-new
-          EOF
-          ssh-keyscan -t ed25519,rsa aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
-
-      - name: 📤 Push to AUR 📤
-        run: |
-          set -euo pipefail
-          pkg="${{ matrix.pkg }}"
-          git clone "ssh://aur@aur.archlinux.org/${pkg}.git" aur-repo
-          cp "packaging/arch/${pkg}/PKGBUILD" aur-repo/PKGBUILD
-          cp "packaging/arch/${pkg}/.SRCINFO" aur-repo/.SRCINFO
-          cd aur-repo
-          git config user.name "Jason Ozias"
-          git config user.email "jason.g.ozias@gmail.com"
-          git add PKGBUILD .SRCINFO
-          if git diff --cached --quiet; then
-            echo "No changes for ${pkg}; nothing to publish."
-            exit 0
-          fi
-          git commit -m "Update to ${GITHUB_REF_NAME#v}"
-          for attempt in 1 2 3; do
-            if git push; then exit 0; fi
-            echo "Push of ${pkg} attempt ${attempt} failed; retrying in 15s..."
-            sleep 15
-          done
-          echo "All push attempts for ${pkg} failed."
-          exit 1
-
-  # --------------------------------------------------------------------------
-  # Open a PR syncing the refreshed PKGBUILDs/.SRCINFO back into this repo.
-  # --------------------------------------------------------------------------
-  sync-pkgbuilds:
-    name: 🔁 Sync PKGBUILDs in-tree 🔁
-    needs: [update-pkgbuilds]
+    if: "!contains(github.ref_name, '-rc')"
+    needs: [build, release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -342,29 +296,326 @@ jobs:
       - name: ✅ Checkout ✅
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: ⬇️ Download updated PKGBUILDs ⬇️
-        uses: actions/download-artifact@v4
+      - name: ⬇️ Download release assets ⬇️
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: aur-packages
-          path: packaging/arch
+          name: release-assets
+          path: release-assets/
+
+      - name: 🔢 Compute binary checksums 🔢
+        id: binsums
+        run: |
+          set -euo pipefail
+          {
+            echo "dist_rake=$(sha256sum release-assets/dist-rake.tar.gz | awk '{print $1}')"
+            echo "rake_x86_64=$(sha256sum release-assets/rake-x86_64-unknown-linux-musl | awk '{print $1}')"
+            echo "rake_aarch64=$(sha256sum release-assets/rake-aarch64-unknown-linux-musl | awk '{print $1}')"
+            echo "rake_unstable_x86_64=$(sha256sum release-assets/rake-unstable-x86_64-unknown-linux-musl | awk '{print $1}')"
+            echo "rake_unstable_aarch64=$(sha256sum release-assets/rake-unstable-aarch64-unknown-linux-musl | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 📝 Update source PKGBUILDs 📝
+        env:
+          PKGVER: ${{ needs.build.outputs.pkgver }}
+          SRC_SHA256: ${{ needs.release.outputs.tarball_sha256 }}
+        run: |
+          set -euo pipefail
+          for pkg in rake rake-unstable; do
+            PKGBUILD="packaging/arch/${pkg}/PKGBUILD"
+            sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" "$PKGBUILD"
+            sed -i "s/^pkgrel=.*/pkgrel=1/" "$PKGBUILD"
+            sed -i "s|^sha256sums=.*|sha256sums=('${SRC_SHA256}')|" "$PKGBUILD"
+          done
+
+      - name: 📝 Update binary PKGBUILDs 📝
+        env:
+          PKGVER:                ${{ needs.build.outputs.pkgver }}
+          DIST_RAKE:             ${{ steps.binsums.outputs.dist_rake }}
+          RAKE_X86_64:           ${{ steps.binsums.outputs.rake_x86_64 }}
+          RAKE_AARCH64:          ${{ steps.binsums.outputs.rake_aarch64 }}
+          RAKE_UNSTABLE_X86_64:  ${{ steps.binsums.outputs.rake_unstable_x86_64 }}
+          RAKE_UNSTABLE_AARCH64: ${{ steps.binsums.outputs.rake_unstable_aarch64 }}
+        run: |
+          set -euo pipefail
+
+          PKGBUILD="packaging/arch/rake-bin/PKGBUILD"
+          sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" "$PKGBUILD"
+          sed -i "s/^pkgrel=.*/pkgrel=1/" "$PKGBUILD"
+          sed -i "s|^sha256sums=.*|sha256sums=('${DIST_RAKE}')|" "$PKGBUILD"
+          sed -i "s|^sha256sums_x86_64=.*|sha256sums_x86_64=('${RAKE_X86_64}')|" "$PKGBUILD"
+          sed -i "s|^sha256sums_aarch64=.*|sha256sums_aarch64=('${RAKE_AARCH64}')|" "$PKGBUILD"
+
+          PKGBUILD="packaging/arch/rake-unstable-bin/PKGBUILD"
+          sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" "$PKGBUILD"
+          sed -i "s/^pkgrel=.*/pkgrel=1/" "$PKGBUILD"
+          sed -i "s|^sha256sums=.*|sha256sums=('${DIST_RAKE}')|" "$PKGBUILD"
+          sed -i "s|^sha256sums_x86_64=.*|sha256sums_x86_64=('${RAKE_UNSTABLE_X86_64}')|" "$PKGBUILD"
+          sed -i "s|^sha256sums_aarch64=.*|sha256sums_aarch64=('${RAKE_UNSTABLE_AARCH64}')|" "$PKGBUILD"
+
+      - name: 🔄 Generate .SRCINFO files 🔄
+        run: |
+          set -euo pipefail
+          for pkg_dir in packaging/arch/*/; do
+            docker run --rm \
+              -v "$(pwd)/${pkg_dir%/}:/pkg" \
+              -w /pkg \
+              archlinux:latest \
+              bash -c "useradd -m builder && chown -R builder /pkg && su -s /bin/bash builder -c 'makepkg --printsrcinfo'" \
+              > "${pkg_dir}.SRCINFO"
+          done
+
+      - name: ⬆️ Upload updated PKGBUILDs ⬆️
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pkgbuilds
+          if-no-files-found: error
+          include-hidden-files: true
+          path: packaging/arch/
 
       - name: 🔁 Open sync PR 🔁
-        uses: peter-evans/create-pull-request@v7
-        with:
-          branch: sync/pkgbuilds-${{ github.ref_name }}
-          title: "chore(packaging): sync PKGBUILDs for ${{ github.ref_name }}"
-          commit-message: "chore(packaging): sync PKGBUILDs for ${{ github.ref_name }}"
-          body: |
-            Refreshed checksums and `.SRCINFO` for the AUR packages, generated by
-            the release workflow for ${{ github.ref_name }}.
-          add-paths: packaging/arch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PKGVER: ${{ needs.build.outputs.pkgver }}
+        run: |
+          set -euo pipefail
+          BRANCH="chore/pkgbuild-v${PKGVER}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add packaging/arch/
+          git diff --cached --quiet || git commit \
+            -m "chore(packaging): update PKGBUILDs to v${PKGVER}"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "chore(packaging): update PKGBUILDs to v${PKGVER}" \
+            --body "Refreshed checksums and \`.SRCINFO\` for the AUR packages, generated by the release workflow for v${PKGVER}. AUR packages have already been published from this branch; merge to keep the in-tree PKGBUILDs in sync." \
+            --base master \
+            --head "$BRANCH"
 
   # --------------------------------------------------------------------------
-  # Update the Homebrew tap formula.
+  # Push the refreshed PKGBUILD + .SRCINFO to each AUR package repository.
+  # Skipped for -rc tags.
+  # --------------------------------------------------------------------------
+  aur-publish:
+    name: 📤 Publish to AUR 📤
+    if: "!contains(github.ref_name, '-rc')"
+    needs: [build, update-pkgbuilds]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        package: [rake, rake-unstable, rake-bin, rake-unstable-bin]
+    steps:
+      - name: ⬇️ Download updated PKGBUILDs ⬇️
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pkgbuilds
+          path: packaging/arch/
+
+      - name: 📤 Publish ${{ matrix.package }} to AUR 📤
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          PKGNAME: ${{ matrix.package }}
+          PKGVER: ${{ needs.build.outputs.pkgver }}
+        run: |
+          set -euo pipefail
+
+          # SSH setup — env var preserves newlines natively; no YAML parsing involved.
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          printf 'Host aur.archlinux.org\n  IdentityFile ~/.ssh/aur\n  User aur\n' >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+          # Clone AUR repo and handle all states: normal (origin/master tracked),
+          # detached HEAD (prior failed push), or empty repo (first-ever push).
+          git clone "ssh://aur@aur.archlinux.org/${PKGNAME}.git" /tmp/aur-repo
+          cd /tmp/aur-repo
+          if git show-ref --quiet refs/remotes/origin/master; then
+            git checkout master
+          elif git rev-parse HEAD 2>/dev/null; then
+            git checkout -B master
+          else
+            git checkout --orphan master
+          fi
+
+          # Copy PKGBUILD and all sidecar files (including the .SRCINFO generated upstream).
+          PKG_DIR="${GITHUB_WORKSPACE}/packaging/arch/${PKGNAME}"
+          cp "${PKG_DIR}/PKGBUILD" .
+          find "${PKG_DIR}" -maxdepth 1 -type f ! -name PKGBUILD -exec cp -v {} . \;
+
+          git config user.name  "Jason Ozias"
+          git config user.email "jason.g.ozias@gmail.com"
+          git add .
+          git diff-index --quiet HEAD 2>/dev/null || git commit -m "Update to v${PKGVER}"
+
+          for attempt in 1 2 3; do
+            if git push origin master; then
+              break
+            fi
+            if [[ $attempt -lt 3 ]]; then
+              echo "Push attempt ${attempt} failed, retrying in 10s..."
+              sleep 10
+            else
+              echo "All push attempts failed."
+              exit 1
+            fi
+          done
+
+  # --------------------------------------------------------------------------
+  # Publish the signed APT and RPM repositories to the cargo-rake-packages repo.
+  # Skipped for -rc tags. Requires PACKAGES_* secrets (see README/workflow docs).
+  # --------------------------------------------------------------------------
+  publish-packages:
+    name: 📦 Publish package repository 📦
+    if: "!contains(github.ref_name, '-rc')"
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: ⬇️ Download release assets ⬇️
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-assets
+          path: release-assets/
+
+      - name: 🧰 Install tools 🧰
+        run: sudo apt-get update && sudo apt-get install -y apt-utils dpkg-dev createrepo-c
+
+      - name: 🔐 Import GPG signing key 🔐
+        run: echo "${{ secrets.PACKAGES_GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+      - name: 📥 Clone cargo-rake-packages repo 📥
+        env:
+          PACKAGES_REPO_TOKEN: ${{ secrets.PACKAGES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone \
+            "https://oauth2:${PACKAGES_REPO_TOKEN}@github.com/rustyhorde/cargo-rake-packages.git" \
+            /tmp/cargo-rake-packages
+          cd /tmp/cargo-rake-packages
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: 📦 Add DEB packages to APT pool 📦
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cargo-rake-packages/apt/pool/main
+          rm -f /tmp/cargo-rake-packages/apt/pool/main/*.deb
+          cp release-assets/*_amd64.deb /tmp/cargo-rake-packages/apt/pool/main/
+          cp release-assets/*_arm64.deb /tmp/cargo-rake-packages/apt/pool/main/
+
+      - name: 📦 Add RPM packages to RPM pool 📦
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cargo-rake-packages/rpm/x86_64 /tmp/cargo-rake-packages/rpm/aarch64
+          rm -f /tmp/cargo-rake-packages/rpm/x86_64/*.rpm /tmp/cargo-rake-packages/rpm/aarch64/*.rpm
+          cp release-assets/*.x86_64.rpm  /tmp/cargo-rake-packages/rpm/x86_64/
+          cp release-assets/*.aarch64.rpm /tmp/cargo-rake-packages/rpm/aarch64/
+
+      - name: 🗂️ Generate APT repo metadata 🗂️
+        env:
+          PACKAGES_GPG_KEY_ID: ${{ secrets.PACKAGES_GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          cd /tmp/cargo-rake-packages
+          mkdir -p apt/dists/stable/main/binary-amd64 apt/dists/stable/main/binary-arm64
+          mkdir -p /tmp/apt-ftparchive-cache
+
+          cat > apt-ftparchive.conf << 'APTCONF'
+          Dir {
+            ArchiveDir "apt";
+            CacheDir "/tmp/apt-ftparchive-cache";
+          };
+
+          Default {
+            Packages::Compress ". gzip xz";
+          };
+
+          BinDirectory "pool/main" {
+            Packages "dists/stable/main/binary-amd64/Packages";
+            Architecture "amd64";
+          };
+
+          BinDirectory "pool/main" {
+            Packages "dists/stable/main/binary-arm64/Packages";
+            Architecture "arm64";
+          };
+          APTCONF
+
+          apt-ftparchive generate apt-ftparchive.conf
+
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=rake \
+            -o APT::FTPArchive::Release::Label=rake \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
+            -o APT::FTPArchive::Release::Components=main \
+            -o APT::FTPArchive::Release::Description="rake package repository" \
+            release apt/dists/stable > apt/dists/stable/Release
+
+          gpg --batch --yes \
+            --pinentry-mode loopback \
+            --local-user "$PACKAGES_GPG_KEY_ID" \
+            --armor --clearsign \
+            -o apt/dists/stable/InRelease \
+            apt/dists/stable/Release
+
+          gpg --batch --yes \
+            --pinentry-mode loopback \
+            --local-user "$PACKAGES_GPG_KEY_ID" \
+            --armor --detach-sign \
+            -o apt/dists/stable/Release.gpg \
+            apt/dists/stable/Release
+
+      - name: 🗂️ Generate RPM repo metadata 🗂️
+        env:
+          PACKAGES_GPG_KEY_ID: ${{ secrets.PACKAGES_GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          cd /tmp/cargo-rake-packages
+          for arch in x86_64 aarch64; do
+            createrepo_c --update rpm/${arch}/
+            gpg --batch --yes \
+              --pinentry-mode loopback \
+              --local-user "$PACKAGES_GPG_KEY_ID" \
+              --armor --detach-sign \
+              -o rpm/${arch}/repodata/repomd.xml.asc \
+              rpm/${arch}/repodata/repomd.xml
+          done
+
+      - name: ⬆️ Commit and push ⬆️
+        env:
+          PKGVER: ${{ needs.build.outputs.pkgver }}
+        run: |
+          set -euo pipefail
+          cd /tmp/cargo-rake-packages
+          git add .
+          git diff-index --quiet HEAD || git commit -m "Update to v${PKGVER}"
+          for attempt in 1 2 3; do
+            if git push origin main; then break; fi
+            if [[ $attempt -lt 3 ]]; then
+              echo "Push attempt ${attempt} failed, retrying in 10s..."
+              sleep 10
+            else
+              echo "All push attempts failed."
+              exit 1
+            fi
+          done
+
+  # --------------------------------------------------------------------------
+  # Update the Homebrew tap formula. Skipped for -rc tags.
   # --------------------------------------------------------------------------
   update-homebrew:
     name: 🍺 Update Homebrew tap 🍺
-    needs: [create-release]
+    if: "!contains(github.ref_name, '-rc')"
+    needs: [build, build-macos, release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -373,27 +624,53 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: ⬇️ Download macOS assets ⬇️
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: macos-assets
-          path: macos-assets
+          name: release-assets-macos
+          path: release-assets-macos/
 
-      - name: 🍺 Render and push formula 🍺
+      - name: 🔢 Compute checksum 🔢
+        id: checksums
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          sha="$(sha256sum macos-assets/rake-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)"
-          git clone "https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/rustyhorde/homebrew-rake.git" tap
-          mkdir -p tap/Formula
-          sed -e "s/PKGVER/${version}/g" -e "s/RAKE_MACOS_SHA256/${sha}/g" \
-            packaging/homebrew/rake.rb.tmpl > tap/Formula/rake.rb
-          cd tap
-          git config user.name "Jason Ozias"
-          git config user.email "jason.g.ozias@gmail.com"
-          git add Formula/rake.rb
-          if git diff --cached --quiet; then
-            echo "No formula changes; nothing to publish."
-            exit 0
+          echo "rake=$(sha256sum release-assets-macos/rake-aarch64-apple-darwin.tar.gz | awk '{print $1}')" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: 🍺 Render and push formula 🍺
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          PKGVER: ${{ needs.build.outputs.pkgver }}
+          RAKE_MACOS_SHA256: ${{ steps.checksums.outputs.rake }}
+        run: |
+          set -euo pipefail
+          sed -e "s/PKGVER/${PKGVER}/g" -e "s/RAKE_MACOS_SHA256/${RAKE_MACOS_SHA256}/g" \
+            packaging/homebrew/rake.rb.tmpl > rake.rb
+
+          git clone "https://oauth2:${HOMEBREW_TAP_TOKEN}@github.com/rustyhorde/homebrew-rake.git" /tmp/tap
+          mkdir -p /tmp/tap/Formula
+          cp rake.rb /tmp/tap/Formula/rake.rb
+          cd /tmp/tap
+          if git show-ref --quiet refs/remotes/origin/master; then
+            git checkout master
+          elif git rev-parse HEAD 2>/dev/null; then
+            git checkout -B master
+          else
+            git checkout --orphan master
           fi
-          git commit -m "rake ${version}"
-          git push
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/
+          git diff-index --quiet HEAD 2>/dev/null || git commit -m "rake v${PKGVER}"
+
+          for attempt in 1 2 3; do
+            if git push origin master; then
+              break
+            fi
+            if [[ $attempt -lt 3 ]]; then
+              echo "Push attempt ${attempt} failed, retrying in 10s..."
+              sleep 10
+            else
+              echo "All push attempts failed."
+              exit 1
+            fi
+          done

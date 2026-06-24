@@ -137,6 +137,49 @@ fn runs_multiple_named_targets() -> TestResult {
 }
 
 #[test]
+fn skips_target_with_caret_prefix() -> TestResult {
+    // `all` depends on `clean` and `build`; nothing else needs `clean`, so
+    // `^clean` prunes it. `clean`'s output is absent and a `Skipped` line shows.
+    let dir = rakefile_dir(
+        "[[target.clean.command]]\nname = \"wipe\"\ncmd = [\"echo\", \"CLEANING\"]\n\
+         [[target.build.command]]\nname = \"compile\"\ncmd = [\"echo\", \"BUILDING\"]\n\
+         [target.all]\ndepends_on = [\"clean\", \"build\"]\n",
+    )?;
+    rake(&dir)?
+        .arg("all")
+        .arg("^clean")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("BUILDING"))
+        .stdout(predicate::str::contains("CLEANING").not())
+        .stderr(predicate::str::contains(
+            "     Skipped [ rake ] [ clean ] skip requested",
+        ));
+    Ok(())
+}
+
+#[test]
+fn skip_required_by_other_target_fails_fast() -> TestResult {
+    // `build` (not a root) depends on `clean`, so `^clean` is rejected before
+    // anything runs.
+    let dir = rakefile_dir(
+        "[[target.clean.command]]\nname = \"wipe\"\ncmd = [\"echo\", \"CLEANING\"]\n\
+         [target.build]\ndepends_on = [\"clean\"]\n\
+         [[target.build.command]]\nname = \"compile\"\ncmd = [\"echo\", \"BUILDING\"]\n\
+         [target.all]\ndepends_on = [\"build\"]\n",
+    )?;
+    rake(&dir)?
+        .arg("all")
+        .arg("^clean")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "target 'clean' cannot be skipped: required by build",
+        ));
+    Ok(())
+}
+
+#[test]
 fn runs_default_target_when_none_given() -> TestResult {
     let dir = rakefile_dir(SAMPLE)?;
     rake(&dir)?
@@ -190,6 +233,27 @@ fn failing_target_propagates_exit_code() -> TestResult {
     Ok(())
 }
 
+/// A target whose command names a program that cannot be launched aborts the run
+/// with a spawn error. Even on that error path the run still prints the failed
+/// command's `Cmd Runtime` and the total `Runtime` before the error message.
+#[test]
+fn spawn_failure_still_prints_runtimes() -> TestResult {
+    let toml = "[[target.ghost.command]]\nname = \"missing\"\n\
+                cmd = [\"this-program-does-not-exist-cargo-rake\"]\n";
+    let dir = rakefile_dir(toml)?;
+    rake(&dir)?
+        .arg("ghost")
+        .assert()
+        .failure()
+        // The command was attempted, so its per-command runtime prints...
+        .stderr(predicate::str::contains(" Cmd Runtime "))
+        // ...and the total runtime prints even though the run aborts...
+        .stderr(predicate::str::contains("     Runtime "))
+        // ...with the spawn error surfaced afterwards.
+        .stderr(predicate::str::contains("could not launch"));
+    Ok(())
+}
+
 #[test]
 fn skip_on_error_continues_chain() -> TestResult {
     let dir = rakefile_dir(SAMPLE)?;
@@ -232,7 +296,7 @@ fn depends_only_target_runs_dependencies() -> TestResult {
 /// A target whose tool is reported absent (`check` is `false`) and whose
 /// `install` is a portable no-op (`true`), so the run installs then proceeds.
 const NEEDS_TOOL: &str = r#"
-[tool.widget]
+[tool.cargo.widget]
 check = ["false"]
 install = ["true"]
 

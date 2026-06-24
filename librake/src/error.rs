@@ -31,6 +31,91 @@ pub enum Error {
         /// The offending command's name.
         command: String,
     },
+    /// A target's command declared no body at all — none of `cmd`, `sh`, `fish`,
+    /// or `ps`.
+    #[error(
+        "target '{target}' command '{command}' declares none of 'cmd', 'sh', 'fish', or 'ps' (it must set at least one)"
+    )]
+    MissingCommandBody {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+    },
+    /// A target's command declared both a `cmd` array and a shell variant; the
+    /// two kinds are mutually exclusive.
+    #[error(
+        "target '{target}' command '{command}' declares both 'cmd' and a shell variant (sh/fish/ps); they are mutually exclusive"
+    )]
+    AmbiguousCommandBody {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+    },
+    /// A target's command declared a shell variant that is empty or only
+    /// whitespace.
+    #[error(
+        "target '{target}' command '{command}' has an empty '{variant}' (it must contain a command line to run)"
+    )]
+    EmptyShell {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// Which shell variant was blank: `sh`, `fish`, or `ps`.
+        variant: &'static str,
+    },
+    /// A command was selected to run but declares no variant for the detected
+    /// shell, so there is nothing to run under it.
+    #[error(
+        "target '{target}' command '{command}' has no '{shell}' variant for the current shell (add a '{shell}' command line, or run from a shell whose variant is defined)"
+    )]
+    MissingShellVariant {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// The detected shell's variant key: `sh`, `fish`, or `ps`.
+        shell: &'static str,
+    },
+    /// A command's `platform` list named an unrecognized token (likely a typo).
+    #[error(
+        "target '{target}' command '{command}' has invalid platform '{token}' (valid: an OS like linux, macos, windows, freebsd, … or a family like unix, windows)"
+    )]
+    InvalidPlatform {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// The unrecognized platform token.
+        token: String,
+    },
+    /// A command's `arch` list named an unrecognized token (likely a typo).
+    #[error(
+        "target '{target}' command '{command}' has invalid arch '{token}' (valid: x86_64, aarch64, arm, x86, riscv64, …)"
+    )]
+    InvalidArch {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// The unrecognized architecture token.
+        token: String,
+    },
+    /// A command declared an empty `platform` or `arch` list, which would gate
+    /// the command out on every host.
+    #[error(
+        "target '{target}' command '{command}' has an empty '{key}' list (omit it to run everywhere, or list at least one token)"
+    )]
+    EmptyPlatformList {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// Which gating key was empty: `platform` or `arch`.
+        key: &'static str,
+    },
     /// A target declared two commands with the same `name`.
     #[error(
         "target '{target}' declares duplicate command name '{command}' (each [[target.{target}.command]] must have a unique name)"
@@ -61,6 +146,16 @@ pub enum Error {
         /// The cycle path, e.g. `["a", "b", "c", "a"]`.
         cycle: Vec<String>,
     },
+    /// A target requested to be skipped (e.g. `^clean`) is depended on by
+    /// another target that still runs in this invocation, so skipping it would
+    /// run that target without its prerequisite.
+    #[error("target '{target}' cannot be skipped: required by {dependents}")]
+    SkipNotAllowed {
+        /// The target that was requested to be skipped.
+        target: String,
+        /// The non-root targets that depend on it, comma-joined.
+        dependents: String,
+    },
     /// A target's program could not be launched.
     #[error("failed to run target '{target}' command '{command}': could not launch '{program}'")]
     Spawn {
@@ -73,7 +168,8 @@ pub enum Error {
         /// The underlying I/O error.
         source: io::Error,
     },
-    /// A target's `tools` listed a name with no matching `[tool.<name>]` entry.
+    /// A target's `tools` listed a name with no matching `[tool.cargo.<name>]`
+    /// or `[tool.os.<name>]` entry.
     #[error("target '{target}' needs unknown tool '{tool}'")]
     UnknownTool {
         /// The target declaring the tool dependency.
@@ -117,6 +213,34 @@ pub enum Error {
         tool: String,
         /// The non-zero exit status of the install command.
         status: ExitStatus,
+    },
+    /// A required OS tool is not installed and declares no `install` command for
+    /// `rake` to run, so the run is aborted with the requirement (and any `hint`).
+    #[error(
+        "{}",
+        match .hint {
+            Some(hint) => format!(
+                "the '{tool}' tool is required but not installed.\n{hint}"
+            ),
+            None => format!(
+                "the '{tool}' tool is required but not installed.\nInstall it and try again."
+            ),
+        }
+    )]
+    RequiredToolMissing {
+        /// The missing OS tool's name.
+        tool: String,
+        /// An optional, tool-supplied hint describing how to install it.
+        hint: Option<String>,
+    },
+    /// A tool name was declared in both the `[tool.cargo]` and `[tool.os]`
+    /// categories; tool reference names share one flat namespace.
+    #[error(
+        "tool '{tool}' is declared in both [tool.cargo] and [tool.os] (tool names must be unique across categories)"
+    )]
+    DuplicateTool {
+        /// The name declared in both categories.
+        tool: String,
     },
     /// A Rust toolchain (cargo) is required to run targets but none is available
     /// — it was not found and installation was declined, impossible (no

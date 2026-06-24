@@ -3,10 +3,11 @@
 //! A `Rakefile.toml` declares named targets at the top level, each with an
 //! ordered array of named commands (every command has a `cmd` to run and an
 //! optional `skip_on_error` flag), an optional `depends_on` list, and an
-//! optional `tools` list naming entries in a top-level `[tool.<name>]` table.
+//! optional `tools` list naming entries in a top-level `[tool]` table (split
+//! into `[tool.cargo.<name>]` and `[tool.os.<name>]`, see [`ToolTable`]).
 //! Targets are parsed and validated by [`Rakefile`], and run in dependency
 //! order via [`Rakefile::run`]; a target's commands run in array order, after
-//! its referenced [`Tool`]s have been ensured (installed if missing).
+//! its referenced tools have been ensured (installed if missing).
 
 //! librake
 
@@ -263,9 +264,10 @@ use std::process::ExitStatus;
 pub use crate::{
     error::{Error, Result},
     rakefile::{
-        Command, Rakefile, RunReport, Target, format_duration, print_runtime, print_total_runtime,
+        Command, Host, Rakefile, RunReport, ShellFamily, Target, detect_shell_family,
+        format_duration, print_runtime, print_total_runtime,
     },
-    tool::{SemverCheck, Tool},
+    tool::{CargoTool, OsTool, SemverCheck, ToolTable},
     toolchain::ensure_rust_toolchain,
 };
 
@@ -288,7 +290,7 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 }
 
 /// Render the targets of `rakefile` for display, in declaration order, showing
-/// each target's `cmd` and any `depends_on`.
+/// each command (its `cmd` or its shell-resolved `sh`) and any `depends_on`.
 #[must_use]
 pub fn list_targets(rakefile: &Rakefile) -> String {
     let mut out = String::new();
@@ -306,17 +308,17 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
             let _ = writeln!(out, "    tools: {}", target.tools.join(", "));
         }
         for command in &target.commands {
-            let marker = if command.skip_on_error {
-                " (skip_on_error)"
-            } else {
-                ""
-            };
-            let _ = writeln!(
-                out,
-                "    {}: {}{marker}",
-                command.name,
-                command.cmd.join(" ")
-            );
+            let mut marker = String::new();
+            if let Some(platforms) = &command.platform {
+                let _ = write!(marker, " (platform: {})", platforms.join(", "));
+            }
+            if let Some(arches) = &command.arch {
+                let _ = write!(marker, " (arch: {})", arches.join(", "));
+            }
+            if command.skip_on_error {
+                marker.push_str(" (skip_on_error)");
+            }
+            let _ = writeln!(out, "    {}: {}{marker}", command.name, command.display());
         }
     }
     out

@@ -254,7 +254,7 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use clap::FromArgMatches as _;
 use librake::cli::Cli;
-use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets, print_total_runtime};
+use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets};
 use vergen_pretty::{Pretty, vergen_pretty_env};
 
 // Dev-dependencies used only by the `tests/` integration suite; named here so
@@ -305,8 +305,9 @@ fn run(cli: &Cli) -> Result<()> {
     } else {
         cli.targets.iter().map(String::as_str).collect()
     };
+    // `run` prints the total `Runtime` line itself (on success and on an
+    // aborting error alike), so the error still propagates after that line.
     let report = rakefile.run(&names)?;
-    print_total_runtime(report.elapsed);
     match report.status {
         Some(status) => exit(exit_code(status)),
         // No command ran (a depends-only target chain): treat as success.

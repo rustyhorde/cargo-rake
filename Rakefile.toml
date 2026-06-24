@@ -14,8 +14,8 @@
 #                          # "nightly-2024-01-01"). Omitted here so this repo's
 #                          # runs use the active toolchain.
 #
-#   [tool.<name>]          # OPTIONAL table of external tools (cargo subcommands,
-#                          # etc.) that targets can reference by name.
+#   [tool.cargo.<name>]    # OPTIONAL table of cargo-installable tools (cargo
+#                          # subcommands, etc.) that targets reference by name.
 #     crate        = "..." # crates.io name; required when update = true.
 #     check        = [...] # REQUIRED. Presence probe; zero exit = installed.
 #                          # For a cargo subcommand use ["cargo", "<sub>",
@@ -25,6 +25,15 @@
 #                          # against semver_check and reinstall if newer.
 #     semver_check = "crates-io"  # default (and only mode today).
 #
+#   [tool.os.<name>]       # OPTIONAL table of OS-level dependencies (docker,
+#                          # pkg-config, …) that rake cannot `cargo install`.
+#                          # No update support. Tool names share one flat
+#                          # reference namespace with [tool.cargo.*].
+#     check   = [...]      # REQUIRED. Presence probe; zero exit = installed.
+#     install = [...]      # OPTIONAL. Run when absent; if omitted, an absent
+#                          # tool aborts the run with the requirement below.
+#     hint    = "..."      # OPTIONAL. Shown when absent and no install is set.
+#
 #   [target.<name>]
 #     depends_on = []      # default. Targets to run first, in order.
 #     tools      = []      # default. Tool names (from [tool.*]) to ensure first.
@@ -32,31 +41,55 @@
 #   [[target.<name>.command]]
 #     name          = "..."   # REQUIRED. Label shown in --list and errors;
 #                             # unique within the target.
-#     cmd           = [...]   # REQUIRED, non-empty. Program + args, spawned
-#                             # directly — no shell.
+#     cmd           = [...]   # Program + args, spawned directly — no shell.
+#                             # Mutually exclusive with sh/fish/ps.
+#     sh            = "..."   # A command line run through `sh -c`. Selected when
+#                             # the detected shell is a POSIX shell.
+#     fish          = "..."   # A command line run through `fish -c`. Selected
+#                             # when the detected shell is fish.
+#     ps            = "..."   # A command line run through PowerShell `-Command`
+#                             # (pwsh, else powershell). Selected on PowerShell.
+#                             #
+#                             # Set exactly one *kind* of body: either `cmd`, or
+#                             # one or more of sh/fish/ps. rake auto-detects the
+#                             # current shell (via $SHELL) and runs the matching
+#                             # variant; if it isn't defined, the run aborts.
 #     skip_on_error = false   # default. When true, a non-zero exit is tolerated
 #                             # and the target continues instead of aborting.
+#     platform      = [...]   # OPTIONAL, default: unset (every platform). OS
+#                             # and/or family tokens (e.g. "linux", "macos",
+#                             # "windows", or the family "unix"); the command runs
+#                             # only when the host's OS or family matches one,
+#                             # else it is silently skipped (Skipped line).
+#     arch          = [...]   # OPTIONAL, default: unset (every architecture).
+#                             # Arch tokens (e.g. "x86_64", "aarch64"); combined
+#                             # with `platform` as a logical AND.
 # =============================================================================
 # toolchain = "stable"
 
-[tool.matrix]
+[tool.cargo.matrix]
 crate = "cargo-matrix"
 check = ["cargo", "matrix", "--version"]
 install = ["cargo", "install", "cargo-matrix", "--force", "--locked"]
-update = true                     # default: false
+update = true                                                         # default: false
 # semver_check = "crates-io"      # default (and only mode today)
 
-[tool.nextest]
+[tool.cargo.nextest]
 crate = "cargo-nextest"
 check = ["cargo", "nextest", "--version"]
 install = ["cargo", "install", "cargo-nextest", "--force", "--locked"]
 update = true
 
-[tool.llvm-cov]
+[tool.cargo.llvm-cov]
 crate = "cargo-llvm-cov"
 check = ["cargo", "llvm-cov", "--version"]
 install = ["cargo", "install", "cargo-llvm-cov", "--force", "--locked"]
 update = true
+
+# Example OS-level dependency
+[tool.os.docker]
+check = ["docker", "--version"]
+hint = "install Docker: https://docs.docker.com/get-docker/"
 
 [[target.pull.command]]
 name = "pull"
@@ -104,7 +137,15 @@ tools = ["llvm-cov", "matrix", "nextest"]
 depends_on = ["test"]
 [[target.coverage.command]]
 name = "coverage"
-cmd = ["cargo", "matrix", "-F", "unstable", "llvm-cov", "nextest", "--no-report"]
+cmd = [
+    "cargo",
+    "matrix",
+    "-F",
+    "unstable",
+    "llvm-cov",
+    "nextest",
+    "--no-report",
+]
 
 [[target.coverage.command]]
 name = "lcov.info"
@@ -126,7 +167,27 @@ cmd = ["cargo", "clean"]
 
 [[target.clean.command]]
 name = "rm lcov.info"
-cmd = ["rm", "lcov.info"]
+cmd = ["rm", "-f", "lcov.info"]
+
+[target.musl]
+tools = ["docker"]
+[[target.musl.command]]
+name = "musl"
+# A static musl build via a Linux container — only meaningful on a Unix host, so
+# gate it with `platform`. On any other platform rake prints a `Skipped` line and
+# moves on. Defines both a fish and a POSIX variant; rake runs whichever matches
+# the current shell. Note the differing command-substitution syntax: fish `(pwd)`
+# vs POSIX `$(pwd)`, and fish `~` vs POSIX `$HOME`.
+platform = ["linux", "macos"]
+fish = "docker run -v cargo-cache:/root/.cargo/registry -v (pwd):/home/rust/src -v ~/.gitconfig:/root/.gitconfig:ro --rm -t blackdex/rust-musl:x86_64-musl-nightly cargo build --release"
+sh = "docker run -v cargo-cache:/root/.cargo/registry -v \"$(pwd)\":/home/rust/src -v \"$HOME/.gitconfig\":/root/.gitconfig:ro --rm -t blackdex/rust-musl:x86_64-musl-nightly cargo build --release"
+
+[[target.musl.command]]
+name = "perm"
+# `$USER` expands the same in fish and POSIX, but a variant must exist for the
+# detected shell, so define both.
+fish = "sudo chown -R $USER:$USER target/"
+sh = "sudo chown -R $USER:$USER target/"
 
 [target.puc]
 depends_on = ["pull", "clean", "update"]
@@ -135,7 +196,7 @@ depends_on = ["pull", "clean", "update"]
 depends_on = ["fmt", "clippy", "build", "test", "coverage"]
 
 [target.all]
-depends_on = ["fmt", "clippy", "build", "test", "coverage", "install", "clean"]
+depends_on = ["fmt", "clippy", "build", "test", "coverage", "install", "musl", "clean"]
 
 [target.default]
 depends_on = ["most"]

@@ -468,13 +468,14 @@ fn run_one(name: &str, target: &Target, family: ShellFamily) -> Result<(Option<E
     for command in &target.commands {
         // Resolve the invocation before the timer: a command with no variant for
         // the detected shell never starts, so it gets no `Cmd Runtime` line.
-        let (program, args) = command
-            .invocation(family)
-            .ok_or_else(|| Error::MissingShellVariant {
-                target: name.to_string(),
-                command: command.name.clone(),
-                shell: family.key(),
-            })?;
+        let (program, args) =
+            command
+                .invocation(family)
+                .ok_or_else(|| Error::MissingShellVariant {
+                    target: name.to_string(),
+                    command: command.name.clone(),
+                    shell: family.key(),
+                })?;
         let start = Instant::now();
         let result = spawn_resolved(name, command, &program, &args);
         // Print the per-command runtime even when the spawn fails, so a command

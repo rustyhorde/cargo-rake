@@ -29,7 +29,7 @@ use crate::{
 /// variant.
 #[derive(Debug, Deserialize)]
 pub struct Command {
-    /// A label for this command, used in `--list` output and error messages.
+    /// A label for this command, used in `list` output and error messages.
     pub name: String,
     /// The command to run, as a program followed by its arguments. Spawned
     /// directly (no shell), so it behaves identically on every platform.
@@ -109,6 +109,17 @@ pub struct Host {
 
 impl Host {
     /// Detect the host platform from the running binary's compile-time targets.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librake::Host;
+    ///
+    /// let host = Host::detect();
+    /// assert!(!host.os.is_empty());
+    /// assert!(!host.family.is_empty());
+    /// assert!(!host.arch.is_empty());
+    /// ```
     #[must_use]
     pub fn detect() -> Host {
         Host {
@@ -191,6 +202,16 @@ pub enum ShellFamily {
 
 impl ShellFamily {
     /// The Rakefile key naming this family's command variant.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librake::ShellFamily;
+    ///
+    /// assert_eq!(ShellFamily::Posix.key(), "sh");
+    /// assert_eq!(ShellFamily::Fish.key(),  "fish");
+    /// assert_eq!(ShellFamily::Ps.key(),    "ps");
+    /// ```
     #[must_use]
     pub fn key(self) -> &'static str {
         match self {
@@ -280,6 +301,16 @@ fn shell_family_from_env(
 }
 
 /// Detect the current shell family from the process environment.
+///
+/// # Examples
+///
+/// ```no_run
+/// use librake::{ShellFamily, detect_shell_family};
+///
+/// let family = detect_shell_family();
+/// // key() returns "sh", "fish", or "ps" depending on the environment.
+/// println!("shell: {}", family.key());
+/// ```
 #[must_use]
 pub fn detect_shell_family() -> ShellFamily {
     let ps_channel = std::env::var_os("POWERSHELL_DISTRIBUTION_CHANNEL").is_some();
@@ -310,9 +341,33 @@ impl Command {
         }
     }
 
-    /// How this command renders in `--list` (shell-agnostic): a `cmd` body joins
+    /// How this command renders in `list` output (shell-agnostic): a `cmd` body joins
     /// its program + args; a shell command joins each defined variant as
     /// `"{key}: {line}"` (e.g. `sh: $(pwd) … | fish: (pwd) …`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librake::Command;
+    ///
+    /// let cmd = Command {
+    ///     name: "compile".to_string(),
+    ///     cmd: Some(vec!["cargo".to_string(), "build".to_string()]),
+    ///     sh: None, fish: None, ps: None,
+    ///     skip_on_error: false, platform: None, arch: None,
+    /// };
+    /// assert_eq!(cmd.display(), "cargo build");
+    ///
+    /// let shell = Command {
+    ///     name: "archive".to_string(),
+    ///     cmd: None,
+    ///     sh:   Some("tar czf out.tgz .".to_string()),
+    ///     fish: Some("tar czf out.tgz .".to_string()),
+    ///     ps: None,
+    ///     skip_on_error: false, platform: None, arch: None,
+    /// };
+    /// assert_eq!(shell.display(), "sh: tar czf out.tgz . | fish: tar czf out.tgz .");
+    /// ```
     #[must_use]
     pub fn display(&self) -> String {
         if let Some(cmd) = &self.cmd {
@@ -391,6 +446,22 @@ impl Rakefile {
     /// / [`Error::EmptyCmd`] / [`Error::DuplicateCommand`] (two commands in one
     /// target sharing a `name`) / [`Error::UnknownDependency`] /
     /// [`Error::CircularDependency`] if validation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librake::Rakefile;
+    ///
+    /// let toml = r#"
+    /// [[target.build.command]]
+    /// name = "compile"
+    /// cmd  = ["cargo", "build"]
+    /// "#;
+    ///
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
+    /// assert!(rakefile.target("build").is_some());
+    /// # Ok::<(), librake::Error>(())
+    /// ```
     pub fn from_toml_str(s: &str) -> Result<Self> {
         let rakefile: Rakefile = toml::from_str(s)?;
         rakefile.validate()?;
@@ -433,6 +504,21 @@ impl Rakefile {
     }
 
     /// The targets, in declaration order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librake::Rakefile;
+    ///
+    /// let toml = concat!(
+    ///     "[[target.build.command]]\nname=\"c\"\ncmd=[\"cargo\",\"build\"]\n",
+    ///     "[[target.test.command]]\nname=\"t\"\ncmd=[\"cargo\",\"test\"]",
+    /// );
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
+    /// let names: Vec<&str> = rakefile.targets().keys().map(String::as_str).collect();
+    /// assert_eq!(names, ["build", "test"]);
+    /// # Ok::<(), librake::Error>(())
+    /// ```
     #[must_use]
     pub fn targets(&self) -> &IndexMap<String, Target> {
         &self.targets
@@ -445,6 +531,23 @@ impl Rakefile {
     }
 
     /// The Rust toolchain channel this Rakefile targets, if one is declared.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librake::Rakefile;
+    ///
+    /// let without = Rakefile::from_toml_str(
+    ///     "[[target.b.command]]\nname=\"c\"\ncmd=[\"true\"]"
+    /// )?;
+    /// assert_eq!(without.toolchain(), None);
+    ///
+    /// let with_chain = Rakefile::from_toml_str(
+    ///     "toolchain = \"stable\"\n[[target.b.command]]\nname=\"c\"\ncmd=[\"true\"]"
+    /// )?;
+    /// assert_eq!(with_chain.toolchain(), Some("stable"));
+    /// # Ok::<(), librake::Error>(())
+    /// ```
     #[must_use]
     pub fn toolchain(&self) -> Option<&str> {
         self.toolchain.as_deref()
@@ -480,6 +583,20 @@ impl Rakefile {
     /// [`Error::MissingShellVariant`] if a selected command has no variant for
     /// the detected shell, or [`Error::Spawn`] if a command's program cannot be
     /// launched.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librake::Rakefile;
+    ///
+    /// # fn main() -> librake::Result<()> {
+    /// let toml = "[[target.build.command]]\nname=\"compile\"\ncmd=[\"cargo\",\"build\"]";
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
+    /// let report = rakefile.run(&["build"])?;
+    /// println!("status: {:?}", report.status);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn run(&self, names: &[&str]) -> Result<RunReport> {
         self.run_with_family(names, detect_shell_family())
     }
@@ -491,6 +608,20 @@ impl Rakefile {
     ///
     /// # Errors
     /// As [`run`](Self::run).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librake::{Rakefile, ShellFamily};
+    ///
+    /// # fn main() -> librake::Result<()> {
+    /// let toml = "[[target.build.command]]\nname=\"compile\"\ncmd=[\"cargo\",\"build\"]";
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
+    /// let report = rakefile.run_with_family(&["build"], ShellFamily::Posix)?;
+    /// println!("status: {:?}", report.status);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn run_with_family(&self, names: &[&str], family: ShellFamily) -> Result<RunReport> {
         self.run_with(names, family, Host::detect())
     }
@@ -502,6 +633,20 @@ impl Rakefile {
     ///
     /// # Errors
     /// As [`run`](Self::run).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librake::{Rakefile, ShellFamily, Host};
+    ///
+    /// # fn main() -> librake::Result<()> {
+    /// let toml = "[[target.build.command]]\nname=\"compile\"\ncmd=[\"cargo\",\"build\"]";
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
+    /// let report = rakefile.run_with(&["build"], ShellFamily::Posix, Host::detect())?;
+    /// println!("status: {:?}", report.status);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn run_with(&self, names: &[&str], family: ShellFamily, host: Host) -> Result<RunReport> {
         // A `^name` token marks a target to skip rather than a root to run; the
         // rest are roots. With only skips named, fall back to the default target.
@@ -924,6 +1069,18 @@ fn decimal(value: u128, unit: u128) -> String {
 /// Every tier carries exactly [`FRAC_DIGITS`] digits after the decimal,
 /// zero-padded, with the integer part space-padded to [`INT_WIDTH`], e.g.
 /// ` 523.00000 µs`, `   1.01000 ms`, `   1.50100 s`, `1 min   30.50000 s`.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use librake::format_duration;
+///
+/// assert_eq!(format_duration(Duration::from_micros(100)),      " 100.00000 µs");
+/// assert_eq!(format_duration(Duration::from_micros(1_000)),    "   1.00000 ms");
+/// assert_eq!(format_duration(Duration::from_secs(1)),          "   1.00000 s");
+/// assert_eq!(format_duration(Duration::from_micros(90_500_000)), "1 min   30.50000 s");
+/// ```
 #[must_use]
 pub fn format_duration(elapsed: Duration) -> String {
     let us = elapsed.as_micros();
@@ -1480,7 +1637,7 @@ cmd = ["cargo", "doc"]
         let rakefile = Rakefile::from_toml_str(toml)?;
         let build = rakefile.target("build").ok_or("expected 'build'")?;
         let command = build.commands.first().ok_or("expected a command")?;
-        // All three variants render in `--list`.
+        // All three variants render in `list` output.
         assert_eq!(command.display(), "sh: true | fish: true | ps: $true");
         Ok(())
     }

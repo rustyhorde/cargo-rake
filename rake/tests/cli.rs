@@ -63,7 +63,7 @@ fn rake(dir: &TempDir) -> Result<Command, Box<dyn Error>> {
 fn list_prints_targets() -> TestResult {
     let dir = rakefile_dir(SAMPLE)?;
     rake(&dir)?
-        .arg("--list")
+        .arg("list")
         .assert()
         .success()
         .stdout(predicate::str::contains("hello"))
@@ -72,6 +72,34 @@ fn list_prints_targets() -> TestResult {
         .stdout(predicate::str::contains(
             "flaky: sh -c exit 1 (skip_on_error)",
         ));
+    Ok(())
+}
+
+#[test]
+fn syntax_confirms_valid_rakefile() -> TestResult {
+    let dir = rakefile_dir(SAMPLE)?;
+    rake(&dir)?
+        .arg("syntax")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("syntax OK"));
+    Ok(())
+}
+
+#[test]
+fn syntax_reports_invalid_rakefile() -> TestResult {
+    let dir = rakefile_dir(
+        r#"
+[[target.broken.command]]
+name = "x"
+cmd = []
+"#,
+    )?;
+    rake(&dir)?
+        .arg("syntax")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("empty 'cmd'"));
     Ok(())
 }
 

@@ -69,7 +69,7 @@ fn cargo_rake(dir: &TempDir) -> Result<Command, Box<dyn Error>> {
 fn list_prints_targets() -> TestResult {
     let dir = rakefile_dir(SAMPLE)?;
     cargo_rake(&dir)?
-        .arg("--list")
+        .arg("list")
         .assert()
         .success()
         .stdout(predicate::str::contains("hello"))
@@ -78,6 +78,36 @@ fn list_prints_targets() -> TestResult {
         .stdout(predicate::str::contains(
             "flaky: sh -c exit 1 (skip_on_error)",
         ));
+    Ok(())
+}
+
+#[test]
+fn syntax_confirms_valid_rakefile() -> TestResult {
+    let dir = rakefile_dir(SAMPLE)?;
+    cargo_rake(&dir)?
+        .arg("syntax")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("syntax OK"));
+    Ok(())
+}
+
+#[test]
+fn syntax_reports_invalid_rakefile() -> TestResult {
+    // A command with an empty `cmd` is a validation error, surfaced by the
+    // load that `syntax` performs.
+    let dir = rakefile_dir(
+        r#"
+[[target.broken.command]]
+name = "x"
+cmd = []
+"#,
+    )?;
+    cargo_rake(&dir)?
+        .arg("syntax")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("empty 'cmd'"));
     Ok(())
 }
 
@@ -358,12 +388,12 @@ fn missing_required_os_tool_aborts() -> TestResult {
 
 #[test]
 fn strips_leading_rake_arg() -> TestResult {
-    // `cargo-rake rake --list` — the leading `rake` is dropped so the rest
+    // `cargo-rake rake list` — the leading `rake` is dropped so the rest
     // parses like the standalone binary.
     let dir = rakefile_dir(SAMPLE)?;
     Command::cargo_bin("cargo-rake")?
         .arg("rake")
-        .arg("--list")
+        .arg("list")
         .arg("-f")
         .arg(dir.path().join("Rakefile.toml"))
         .assert()
@@ -375,10 +405,10 @@ fn strips_leading_rake_arg() -> TestResult {
 #[test]
 fn works_without_rake_prefix() -> TestResult {
     // Stripping is conditional on argv[1] == "rake"; without it the args still
-    // parse, since the first arg here is `--list`, not `rake`.
+    // parse, since the first arg here is `list`, not `rake`.
     let dir = rakefile_dir(SAMPLE)?;
     Command::cargo_bin("cargo-rake")?
-        .arg("--list")
+        .arg("list")
         .arg("-f")
         .arg(dir.path().join("Rakefile.toml"))
         .assert()

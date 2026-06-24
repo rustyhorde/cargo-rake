@@ -291,6 +291,20 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 
 /// Render the targets of `rakefile` for display, in declaration order, showing
 /// each command (its `cmd` or its shell-resolved `sh`) and any `depends_on`.
+///
+/// # Examples
+///
+/// ```
+/// use librake::{Rakefile, list_targets};
+///
+/// let toml = "[[target.build.command]]\nname=\"compile\"\ncmd=[\"cargo\",\"build\"]";
+/// let rakefile = Rakefile::from_toml_str(toml)?;
+/// let out = list_targets(&rakefile);
+/// assert!(out.contains("build"));
+/// assert!(out.contains("compile"));
+/// assert!(out.contains("cargo build"));
+/// # Ok::<(), librake::Error>(())
+/// ```
 #[must_use]
 pub fn list_targets(rakefile: &Rakefile) -> String {
     let mut out = String::new();

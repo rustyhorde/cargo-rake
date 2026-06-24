@@ -7,27 +7,41 @@
 
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 
 /// A configuration-driven build tool.
 ///
-/// Targets are declared in a `Rakefile.toml`. With no target, the `default`
+/// Targets are declared in a `Rakefile.toml`. With no subcommand, the `default`
 /// target is run.
 #[derive(Debug, Parser)]
 #[command(name = "rake")]
 pub struct Cli {
     /// Path to the Rakefile.
-    #[arg(short, long, default_value = "Rakefile.toml")]
+    #[arg(short, long, global = true, default_value = "Rakefile.toml")]
     pub file: PathBuf,
-    /// List the available targets instead of running one.
-    #[arg(short, long)]
-    pub list: bool,
-    /// The targets to run (defaults to "default"). Runs the union of their
+    /// What to do (defaults to running the `default` target).
+    #[command(subcommand)]
+    pub action: Option<Action>,
+}
+
+/// The action to perform: a built-in subcommand (`list`/`syntax`) or, by
+/// default, running the named targets.
+///
+/// `list` and `syntax` are reserved words; a target sharing one of those names
+/// cannot be run by name (run it via a parent target instead).
+#[derive(Debug, Subcommand)]
+pub enum Action {
+    /// List the available targets and their commands.
+    List,
+    /// Parse and validate the Rakefile, reporting any errors.
+    Syntax,
+    /// Run the named targets (the default action). Runs the union of their
     /// dependency graphs, each target at most once. Prefix a target with `^`
     /// (e.g. `^clean`) to skip it: that target, and any dependency reachable
     /// only through it, is pruned from the run — allowed only when no other
     /// target that still runs depends on it.
-    pub targets: Vec<String>,
+    #[command(external_subcommand)]
+    Run(Vec<String>),
 }
 
 /// Build the [`clap::Command`] for the CLI, labelled with the given `name` and

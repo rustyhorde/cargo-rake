@@ -116,38 +116,62 @@ brew install rake
 ## Rakefile.toml
 
 A `Rakefile.toml` declares named **targets**. Each target owns an ordered array
-of named **commands** plus an optional `depends_on` list:
+of named **commands**, an optional `depends_on` list, and an optional `tools`
+list. Tools are defined once in a top-level `[tool]` table. A complete example:
 
 ```toml
-# Optional: the Rust toolchain this project targets. When set, both `rake` and
-# `cargo rake` verify/install the channel (via rustup) and pin the run to it.
-# Omit it to use whatever toolchain is already active.
-# toolchain = "stable"            # default: unset (active toolchain)
+# toolchain = "stable"   # optional; pins both binaries to a specific Rust channel via rustup
 
-[target.build]
+# Cargo-installable tools (cargo subcommands, etc.)
+[tool.cargo.nextest]
+crate   = "cargo-nextest"                         # crates.io name (required for update checks)
+check   = ["cargo", "nextest", "--version"]       # probe: zero exit = installed
+install = ["cargo", "install", "cargo-nextest", "--force", "--locked"]
+update  = true                                    # re-install when a newer crates.io version exists
+
+# OS-level tools that rake cannot install (docker, pkg-config, …)
+[tool.os.docker]
+check = ["docker", "--version"]
+hint  = "install Docker: https://docs.docker.com/get-docker/"  # shown when absent and no install
+
+# ── Targets ──────────────────────────────────────────────────────────────────
 
 [[target.build.command]]
-name = "compile"                  # label shown in --list and errors (required)
-cmd  = ["cargo", "build", "--all-features"]   # program + args, spawned directly
-# skip_on_error = false           # default: a non-zero exit aborts the target
+name = "compile"           # label shown in `list` output and error messages (required)
+cmd  = ["cargo", "build"]  # program + args, spawned directly — no shell involved
+
+[target.test]
+depends_on = ["build"]     # run these targets first, in order
+tools      = ["nextest"]   # ensure these tools before the target's commands run
+
+[[target.test.command]]
+name = "run"
+cmd  = ["cargo", "nextest", "run"]
+
+[[target.check.command]]
+name          = "fmt"
+cmd           = ["cargo", "fmt", "--check"]
+skip_on_error = true       # tolerate a non-zero exit and keep going
+
+[target.package]
+tools = ["docker"]
+
+[[target.package.command]]
+name     = "archive"
+platform = ["linux", "macos"]               # skipped silently on other platforms
+sh       = "tar czf dist.tgz \"$(pwd)\"/target/release/*"
+fish     = "tar czf dist.tgz (pwd)/target/release/*"
+
+[[target.package.command]]
+name     = "zip"
+platform = ["windows"]
+ps       = "Compress-Archive target/release/* dist.zip"
 
 [target.all]
-depends_on = ["build"]            # default: [] — run these targets first, in order
-# tools     = []                  # default: [] — external tools to ensure (see below)
+depends_on = ["build", "test", "check", "package"]  # depends-only aggregator
 
-[[target.all.command]]
-name = "release"
-cmd  = ["cargo", "build", "--release"]
-
-[[target.all.command]]
-name = "package"
-sh   = "tar czf dist.tgz target/release/*"   # POSIX shell (globs/`$(...)` expand)
-fish = "tar czf dist.tgz target/release/*"   # fish variant (selected under fish)
-
-[[target.all.command]]
-name = "test"
-cmd  = ["cargo", "test"]
-skip_on_error = true              # tolerate a failure and keep going
+[target.default]
+depends_on = ["test"]
 ```
 
 - A command sets **one kind** of body: either `cmd`, or one or more shell
@@ -158,13 +182,17 @@ skip_on_error = true              # tolerate a failure and keep going
   - **`sh` / `fish` / `ps`** are each a single command line run through that
     shell, so shell features (`$(...)` substitution, `~`/`$VAR` expansion, globs,
     pipes) apply: `sh -c`, `fish -c`, and PowerShell `-Command` (`pwsh` if on
-    `PATH`, else `powershell`) respectively. rake **auto-detects the current
-    shell** (from `$SHELL`; PowerShell is detected via its env even though it
-    doesn't set `$SHELL`) and runs the matching variant. Selection is **strict**:
-    if the detected shell has no matching variant, the run aborts with an error —
-    so define a variant for every shell a command must run under.
+    `PATH`, else `powershell`) respectively. rake resolves the current shell in
+    priority order: (1) a PowerShell environment variable
+    (`POWERSHELL_DISTRIBUTION_CHANNEL` or `PSModulePath` on non-Windows) —
+    checked first because PowerShell does not set `$SHELL`; (2) `$SHELL`'s
+    basename; (3) the platform default (`ps` on Windows, Posix otherwise).
+    Selection is **strict**: if the detected shell has no matching variant, the
+    run aborts with an error — so define a variant for every shell a command must
+    run under. A `platform`/`arch` mismatch, by contrast, is a silent skip, not
+    an error.
 - **`[[target.<t>.command]]`** is a TOML array of tables. Each entry needs a
-  `name` (a label used in `--list` output and error messages) and a body (`cmd`
+  `name` (a label used in `list` output and error messages) and a body (`cmd`
   or one or more of `sh`/`fish`/`ps`). Commands run in **array (declaration)
   order**. (TOML table headers are absolute, so the `target.<t>.command` prefix
   is required on each entry.)
@@ -172,36 +200,28 @@ skip_on_error = true              # tolerate a failure and keep going
   exit from that command is tolerated and the target continues with its
   remaining commands instead of aborting.
 - **`depends_on`** lists other targets that must run, in order, before this one.
-- **`tools`** lists external tools (by name) the target needs; see below.
+- **`tools`** lists external tools (by name) the target needs; see [Tools](#tools).
+- **`platform`** (optional list) names OS or family tokens (`linux`/`macos`/
+  `windows`/`unix`/…); **`arch`** names architecture tokens
+  (`x86_64`/`aarch64`/…). A command runs only when every declared dimension
+  matches (AND across dimensions, OR within each list). A non-matching command
+  is **silently skipped** — a `Skipped` status line is printed and execution
+  continues. Both lists are validated at parse time; an empty list or an unknown
+  token is a hard error.
+- **Skipping targets**: prefix a target name with `^` to exclude it from the run
+  (e.g. `rake all ^clean`). The skipped target and any dependency reachable only
+  through it are pruned. A skip is not allowed if another non-root target that
+  still runs `depends_on` the skipped target — the run fails fast. With only
+  skip tokens (e.g. `rake ^clean`), the `default` target runs.
 
 ### Tools
 
-A target can declare external tools it depends on. Tools are defined once in a
-top-level `[tool]` table, split into two categories — **`[tool.cargo.<name>]`**
-for cargo-installable tools (cargo subcommands and the like) and
-**`[tool.os.<name>]`** for OS-level dependencies (`docker`, `pkg-config`, …)
-that `rake` cannot `cargo install`. A target references either kind by name from
-its `tools` list (the two categories share one flat reference namespace, so a
-name must be unique across them):
-
-```toml
-[tool.cargo.matrix]
-crate   = "cargo-matrix"                       # crates.io name (for the update check)
-check   = ["cargo-matrix", "--version"]        # presence probe (zero exit = installed)
-install = ["cargo", "install", "cargo-matrix"] # run when missing or out of date
-update  = false                                # default; see below
-
-[tool.os.docker]
-check   = ["docker", "--version"]              # presence probe (zero exit = installed)
-hint    = "install Docker: https://docs.docker.com/get-docker/"  # shown if absent
-
-[target.clippy]
-tools = ["matrix"]
-
-[[target.clippy.command]]
-name = "clippy"
-cmd  = ["cargo", "matrix", "clippy", "--all-targets", "--", "-Dwarnings"]
-```
+Tools are defined in a top-level `[tool]` table, split into two categories:
+**`[tool.cargo.<name>]`** for cargo-installable tools (cargo subcommands and
+the like) and **`[tool.os.<name>]`** for OS-level dependencies (`docker`,
+`pkg-config`, …) that `rake` cannot `cargo install`. A target references either
+kind by name from its `tools` list (the two categories share one flat reference
+namespace, so a name must be unique across them).
 
 Tools are ensured lazily: a tool's `check` only runs when a target that
 references it is actually run (never at parse time or for unrelated targets), and
@@ -235,9 +255,6 @@ support.
   message stating the requirement, plus any **`hint`** — `rake` does not try to
   install OS dependencies itself.
 
-Each tool is ensured at most once per run, even when several targets reference
-it.
-
 ### Execution
 
 A target runs after its transitive dependencies. Within a target, commands run
@@ -247,14 +264,24 @@ in which case the failure is tolerated and execution continues. The process
 exits with the code of the command that stopped the run (or the last command if
 all succeeded).
 
+When multiple roots are given (e.g. `rake build test`), each root's dependency
+graph runs in full in the order given. A target shared by two roots runs once per
+root (no cross-root deduplication). Tools, however, are ensured at most once for
+the whole run regardless of how many roots reference them.
+
 ## Usage
 
 ```bash
-cargo rake <target>        # run a target (and its dependencies)
-cargo rake --list          # list all targets and their commands
+cargo rake <target>              # run a target (and its dependencies)
+cargo rake all ^clean            # skip 'clean' (and any dep reachable only through it)
+cargo rake list                  # list all targets and their commands
+cargo rake syntax                # parse + validate the Rakefile, reporting any errors
 cargo rake --file path/to/Rakefile.toml <target>
 
-rake <target>              # the standalone binary, same interface
+rake <target>                    # the standalone binary, same interface
 ```
+
+`list` and `syntax` are reserved subcommand names: a target sharing one of
+those names cannot be run by name (run it via a parent target instead).
 
 When no target is named, the `default` target runs.

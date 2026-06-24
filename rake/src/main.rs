@@ -253,7 +253,7 @@ use std::sync::LazyLock;
 
 use anyhow::Result;
 use clap::FromArgMatches as _;
-use librake::cli::Cli;
+use librake::cli::{Action, Cli};
 use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets};
 use vergen_pretty::{Pretty, vergen_pretty_env};
 
@@ -293,17 +293,27 @@ fn main() -> Result<()> {
 
 fn run(cli: &Cli) -> Result<()> {
     let rakefile = Rakefile::from_path(&cli.file)?;
-    if cli.list {
-        print!("{}", list_targets(&rakefile));
-        return Ok(());
+    match &cli.action {
+        Some(Action::List) => {
+            print!("{}", list_targets(&rakefile));
+            return Ok(());
+        }
+        // `from_path` already parsed and validated the Rakefile, so reaching
+        // here means the syntax is sound; just confirm it.
+        Some(Action::Syntax) => {
+            println!("{}: syntax OK", cli.file.display());
+            return Ok(());
+        }
+        Some(Action::Run(_)) | None => {}
     }
     // `rake` may run on a machine without Rust; ensure a toolchain before any
     // target (which almost always shells out to cargo) runs.
     librake::ensure_rust_toolchain(rakefile.toolchain())?;
-    let names: Vec<&str> = if cli.targets.is_empty() {
-        vec![DEFAULT_TARGET]
-    } else {
-        cli.targets.iter().map(String::as_str).collect()
+    let names: Vec<&str> = match &cli.action {
+        Some(Action::Run(targets)) if !targets.is_empty() => {
+            targets.iter().map(String::as_str).collect()
+        }
+        _ => vec![DEFAULT_TARGET],
     };
     // `run` prints the total `Runtime` line itself (on success and on an
     // aborting error alike), so the error still propagates after that line.

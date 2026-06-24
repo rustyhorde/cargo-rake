@@ -29,7 +29,7 @@ use crate::{
 /// variant.
 #[derive(Debug, Deserialize)]
 pub struct Command {
-    /// A label for this command, used in `--list` output and error messages.
+    /// A label for this command, used in `list` output and error messages.
     pub name: String,
     /// The command to run, as a program followed by its arguments. Spawned
     /// directly (no shell), so it behaves identically on every platform.
@@ -310,7 +310,7 @@ impl Command {
         }
     }
 
-    /// How this command renders in `--list` (shell-agnostic): a `cmd` body joins
+    /// How this command renders in `list` output (shell-agnostic): a `cmd` body joins
     /// its program + args; a shell command joins each defined variant as
     /// `"{key}: {line}"` (e.g. `sh: $(pwd) … | fish: (pwd) …`).
     #[must_use]
@@ -1480,7 +1480,7 @@ cmd = ["cargo", "doc"]
         let rakefile = Rakefile::from_toml_str(toml)?;
         let build = rakefile.target("build").ok_or("expected 'build'")?;
         let command = build.commands.first().ok_or("expected a command")?;
-        // All three variants render in `--list`.
+        // All three variants render in `list` output.
         assert_eq!(command.display(), "sh: true | fish: true | ps: $true");
         Ok(())
     }

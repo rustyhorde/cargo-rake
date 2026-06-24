@@ -127,7 +127,7 @@ of named **commands** plus an optional `depends_on` list:
 [target.build]
 
 [[target.build.command]]
-name = "compile"                  # label shown in --list and errors (required)
+name = "compile"                  # label shown in `list` output and errors (required)
 cmd  = ["cargo", "build", "--all-features"]   # program + args, spawned directly
 # skip_on_error = false           # default: a non-zero exit aborts the target
 
@@ -164,7 +164,7 @@ skip_on_error = true              # tolerate a failure and keep going
     if the detected shell has no matching variant, the run aborts with an error —
     so define a variant for every shell a command must run under.
 - **`[[target.<t>.command]]`** is a TOML array of tables. Each entry needs a
-  `name` (a label used in `--list` output and error messages) and a body (`cmd`
+  `name` (a label used in `list` output and error messages) and a body (`cmd`
   or one or more of `sh`/`fish`/`ps`). Commands run in **array (declaration)
   order**. (TOML table headers are absolute, so the `target.<t>.command` prefix
   is required on each entry.)
@@ -251,10 +251,14 @@ all succeeded).
 
 ```bash
 cargo rake <target>        # run a target (and its dependencies)
-cargo rake --list          # list all targets and their commands
+cargo rake list            # list all targets and their commands
+cargo rake syntax          # parse + validate the Rakefile, reporting any errors
 cargo rake --file path/to/Rakefile.toml <target>
 
 rake <target>              # the standalone binary, same interface
 ```
+
+`list` and `syntax` are reserved subcommand names: a target sharing one of
+those names cannot be run by name (run it via a parent target instead).
 
 When no target is named, the `default` target runs.

@@ -53,7 +53,129 @@ pub struct Command {
     /// dependency chain. Defaults to `false`.
     #[serde(default)]
     pub skip_on_error: bool,
+    /// The platforms this command applies to, as OS names (`linux`/`macos`/
+    /// `windows`/…) or family aliases (`unix`/`windows`). When set, the command
+    /// runs only if the host's OS *or* family matches one of these tokens;
+    /// otherwise it is silently skipped. `None` (the default) means every
+    /// platform. Orthogonal to the body kind and to [`arch`](Self::arch).
+    #[serde(default)]
+    pub platform: Option<Vec<String>>,
+    /// The architectures this command applies to (`x86_64`/`aarch64`/…). When
+    /// set, the command runs only if the host's architecture matches one of
+    /// these tokens; otherwise it is silently skipped. `None` (the default)
+    /// means every architecture. Combined with [`platform`](Self::platform) as a
+    /// logical AND.
+    #[serde(default)]
+    pub arch: Option<Vec<String>>,
 }
+
+impl Command {
+    /// Why this command should be skipped on `host`, or `None` when it runs. The
+    /// returned string is the unmet requirement, shown in the `Skipped` status
+    /// line (e.g. `platform: linux, macos`). Each declared dimension
+    /// (`platform`, then `arch`) must have a token matching the host; a
+    /// `platform` token matches the host's OS *or* family, an `arch` token the
+    /// host's architecture. Dimensions left unset always match.
+    fn skip_reason(&self, host: &Host) -> Option<String> {
+        if let Some(platforms) = &self.platform
+            && !platforms.iter().any(|p| p == host.os || p == host.family)
+        {
+            return Some(format!("platform: {}", platforms.join(", ")));
+        }
+        if let Some(arches) = &self.arch
+            && !arches.iter().any(|a| a == host.arch)
+        {
+            return Some(format!("arch: {}", arches.join(", ")));
+        }
+        None
+    }
+}
+
+/// The host platform rake detects for the current run: the running operating
+/// system, OS family, and architecture, used to gate commands by their
+/// `platform`/`arch` lists. The fields mirror [`std::env::consts`]
+/// (`OS`/`FAMILY`/`ARCH`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Host {
+    /// The operating system, e.g. `linux`, `macos`, `windows`
+    /// ([`std::env::consts::OS`]).
+    pub os: &'static str,
+    /// The OS family, e.g. `unix`, `windows` ([`std::env::consts::FAMILY`]).
+    pub family: &'static str,
+    /// The CPU architecture, e.g. `x86_64`, `aarch64`
+    /// ([`std::env::consts::ARCH`]).
+    pub arch: &'static str,
+}
+
+impl Host {
+    /// Detect the host platform from the running binary's compile-time targets.
+    #[must_use]
+    pub fn detect() -> Host {
+        Host {
+            os: std::env::consts::OS,
+            family: std::env::consts::FAMILY,
+            arch: std::env::consts::ARCH,
+        }
+    }
+}
+
+/// Recognized operating-system tokens for a command's `platform` list (the
+/// stable `target_os` values [`std::env::consts::OS`] can report). Used to
+/// reject typos at validation time.
+const KNOWN_OS: &[&str] = &[
+    "linux",
+    "macos",
+    "windows",
+    "freebsd",
+    "netbsd",
+    "openbsd",
+    "dragonfly",
+    "solaris",
+    "illumos",
+    "android",
+    "ios",
+    "tvos",
+    "watchos",
+    "visionos",
+    "fuchsia",
+    "redox",
+    "haiku",
+    "hurd",
+    "aix",
+    "nto",
+    "emscripten",
+    "wasi",
+];
+
+/// Recognized OS-family tokens for a command's `platform` list (the values
+/// [`std::env::consts::FAMILY`] can report). A `platform` token may name either
+/// an OS (see [`KNOWN_OS`]) or one of these families.
+const KNOWN_FAMILY: &[&str] = &["unix", "windows", "wasm"];
+
+/// Recognized architecture tokens for a command's `arch` list (the stable
+/// `target_arch` values [`std::env::consts::ARCH`] can report).
+const KNOWN_ARCH: &[&str] = &[
+    "x86",
+    "x86_64",
+    "arm",
+    "aarch64",
+    "loongarch64",
+    "m68k",
+    "csky",
+    "mips",
+    "mips32r6",
+    "mips64",
+    "mips64r6",
+    "powerpc",
+    "powerpc64",
+    "riscv32",
+    "riscv64",
+    "s390x",
+    "sparc",
+    "sparc64",
+    "wasm32",
+    "wasm64",
+];
 
 /// The shell family rake detects for the current run, naming which command
 /// variant (`sh`/`fish`/`ps`) is selected and how it is invoked.
@@ -364,16 +486,28 @@ impl Rakefile {
 
     /// Like [`run`](Self::run) but with an explicit [`ShellFamily`] rather than
     /// detecting it from the environment, so callers (and tests) can pin which
-    /// shell variant is selected.
+    /// shell variant is selected. The host platform is still detected from the
+    /// environment; pin it too with [`run_with`](Self::run_with).
     ///
     /// # Errors
     /// As [`run`](Self::run).
     pub fn run_with_family(&self, names: &[&str], family: ShellFamily) -> Result<RunReport> {
+        self.run_with(names, family, Host::detect())
+    }
+
+    /// Like [`run`](Self::run) but with both the [`ShellFamily`] and the [`Host`]
+    /// platform pinned rather than detected, so callers (and tests) can select
+    /// which shell variant runs and which commands their `platform`/`arch` lists
+    /// gate in or out.
+    ///
+    /// # Errors
+    /// As [`run`](Self::run).
+    pub fn run_with(&self, names: &[&str], family: ShellFamily, host: Host) -> Result<RunReport> {
         // Resolve the order before the timer: a pre-execution error (an unknown
         // target) aborts without printing a total `Runtime` line.
         let order = graph::execution_order(&self.targets, names)?;
         let start = Instant::now();
-        let result = self.run_steps(&order, family);
+        let result = self.run_steps(&order, family, &host);
         let elapsed = start.elapsed();
         // Print the total runtime on every path that started executing, so an
         // aborting command (spawn failure, missing shell variant, failed tool
@@ -382,11 +516,16 @@ impl Rakefile {
         result.map(|status| RunReport { status, elapsed })
     }
 
-    /// Run the resolved `order` of targets under shell `family`, ensuring each
-    /// referenced tool at most once per run. Returns the last command's status
-    /// (or `None` when no command ran), stopping at the first command that fails
-    /// without `skip_on_error`.
-    fn run_steps(&self, order: &[&str], family: ShellFamily) -> Result<Option<ExitStatus>> {
+    /// Run the resolved `order` of targets under shell `family` on `host`,
+    /// ensuring each referenced tool at most once per run. Returns the last
+    /// command's status (or `None` when no command ran), stopping at the first
+    /// command that fails without `skip_on_error`.
+    fn run_steps(
+        &self,
+        order: &[&str],
+        family: ShellFamily,
+        host: &Host,
+    ) -> Result<Option<ExitStatus>> {
         let mut status = None;
         let mut ensured: HashSet<&str> = HashSet::new();
         for step in order {
@@ -399,7 +538,7 @@ impl Rakefile {
                     self.tools.ensure(name)?;
                 }
             }
-            let (current, stop) = run_one(step, target, family)?;
+            let (current, stop) = run_one(step, target, family, host)?;
             if current.is_some() {
                 status = current;
             }
@@ -415,6 +554,9 @@ impl Rakefile {
 /// non-empty `cmd` array, or one or more non-blank shell variants
 /// (`sh`/`fish`/`ps`) — and must not mix `cmd` with a shell variant.
 fn validate_command(target: &str, command: &Command) -> Result<()> {
+    // Platform/arch gating is orthogonal to the body kind, so validate it first —
+    // the body match below has early returns for a valid `cmd`.
+    validate_platform_gates(target, command)?;
     let shells = [
         ("sh", &command.sh),
         ("fish", &command.fish),
@@ -459,13 +601,69 @@ fn validate_command(target: &str, command: &Command) -> Result<()> {
     Ok(())
 }
 
+/// Validate a command's `platform`/`arch` gating lists: a declared list must be
+/// non-empty, and every token must be recognized. A `platform` token may name an
+/// OS ([`KNOWN_OS`]) or a family ([`KNOWN_FAMILY`]); an `arch` token must be a
+/// known architecture ([`KNOWN_ARCH`]). Unset lists are always valid.
+fn validate_platform_gates(target: &str, command: &Command) -> Result<()> {
+    if let Some(platforms) = &command.platform {
+        if platforms.is_empty() {
+            return Err(Error::EmptyPlatformList {
+                target: target.to_string(),
+                command: command.name.clone(),
+                key: "platform",
+            });
+        }
+        for token in platforms {
+            if !KNOWN_OS.contains(&token.as_str()) && !KNOWN_FAMILY.contains(&token.as_str()) {
+                return Err(Error::InvalidPlatform {
+                    target: target.to_string(),
+                    command: command.name.clone(),
+                    token: token.clone(),
+                });
+            }
+        }
+    }
+    if let Some(arches) = &command.arch {
+        if arches.is_empty() {
+            return Err(Error::EmptyPlatformList {
+                target: target.to_string(),
+                command: command.name.clone(),
+                key: "arch",
+            });
+        }
+        for token in arches {
+            if !KNOWN_ARCH.contains(&token.as_str()) {
+                return Err(Error::InvalidArch {
+                    target: target.to_string(),
+                    command: command.name.clone(),
+                    token: token.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Run a target's commands in array order under shell `family`. Returns the last
 /// status run (or `None` when the target is a dependency-only aggregator with no
 /// commands) and whether execution should stop (a command failed without
 /// `skip_on_error`).
-fn run_one(name: &str, target: &Target, family: ShellFamily) -> Result<(Option<ExitStatus>, bool)> {
+fn run_one(
+    name: &str,
+    target: &Target,
+    family: ShellFamily,
+    host: &Host,
+) -> Result<(Option<ExitStatus>, bool)> {
     let mut last = None;
     for command in &target.commands {
+        // A command whose platform/arch excludes the host is silently skipped
+        // (a no-op, not a failure): the target's remaining commands and the
+        // dependency chain continue. Reported with a `Skipped` status line.
+        if let Some(reason) = command.skip_reason(host) {
+            print_skipped(&command.name, &reason);
+            continue;
+        }
         // Resolve the invocation before the timer: a command with no variant for
         // the detected shell never starts, so it gets no `Cmd Runtime` line.
         let (program, args) =
@@ -516,6 +714,7 @@ pub(crate) const RAKE_TAG: &str = "[ rake ]";
 /// not involved (they live in the line's info, after `Running`).
 const STATUS_LABELS: &[&str] = &[
     "Running",
+    "Skipped",
     "Cmd Runtime",
     "Runtime",
     "Checking",
@@ -607,6 +806,20 @@ fn print_justified(color: &str, label: &str, info: &str, value_color: Option<&st
 /// into the shared [`LABEL_WIDTH`] column.
 pub(crate) fn print_label(label: &str, info: &str) {
     print_justified(BOLD_CYAN, label, info, None);
+}
+
+/// Print a `Skipped` status line for a command excluded by its `platform`/`arch`
+/// list, in the same shape as a `Running` line: a blank separator line, then the
+/// label with the command's name (green on a TTY) and the unmet `reason` (e.g.
+/// `platform: linux, macos`).
+fn print_skipped(command: &str, reason: &str) {
+    let _ = writeln!(stderr()).ok();
+    let name = if color_stderr() {
+        format!("{GREEN}[ {command} ]{RESET}")
+    } else {
+        format!("[ {command} ]")
+    };
+    print_label("Skipped", &format!("{name} {reason}"));
 }
 
 /// Spawn a single named command from its already-resolved `program`/`args`,
@@ -1303,6 +1516,145 @@ cmd = ["cargo", "doc"]
                 Ok(())
             }
             other => Err(format!("expected RequiredToolMissing, got {other:?}").into()),
+        }
+    }
+
+    /// A `Command` with the given `platform`/`arch` gating and a trivial `cmd`
+    /// body, for exercising `skip_reason` directly.
+    fn gated_command(platform: Option<Vec<&str>>, arch: Option<Vec<&str>>) -> super::Command {
+        let to_vec = |v: Option<Vec<&str>>| v.map(|l| l.iter().map(|s| (*s).to_string()).collect());
+        super::Command {
+            name: "c".to_string(),
+            cmd: Some(vec!["true".to_string()]),
+            sh: None,
+            fish: None,
+            ps: None,
+            skip_on_error: false,
+            platform: to_vec(platform),
+            arch: to_vec(arch),
+        }
+    }
+
+    #[test]
+    fn skip_reason_gates_on_platform_and_arch() {
+        use super::Host;
+        let linux = Host {
+            os: "linux",
+            family: "unix",
+            arch: "x86_64",
+        };
+        // No gating runs everywhere.
+        assert!(gated_command(None, None).skip_reason(&linux).is_none());
+        // OS match / mismatch.
+        assert!(
+            gated_command(Some(vec!["linux", "macos"]), None)
+                .skip_reason(&linux)
+                .is_none()
+        );
+        assert_eq!(
+            gated_command(Some(vec!["windows"]), None).skip_reason(&linux),
+            Some("platform: windows".to_string())
+        );
+        // Family alias matches the host family even when no OS token does.
+        assert!(
+            gated_command(Some(vec!["unix"]), None)
+                .skip_reason(&linux)
+                .is_none()
+        );
+        // Arch match / mismatch.
+        assert!(
+            gated_command(None, Some(vec!["x86_64"]))
+                .skip_reason(&linux)
+                .is_none()
+        );
+        assert_eq!(
+            gated_command(None, Some(vec!["aarch64"])).skip_reason(&linux),
+            Some("arch: aarch64".to_string())
+        );
+        // AND across dimensions: a matching platform but mismatched arch skips.
+        assert_eq!(
+            gated_command(Some(vec!["linux"]), Some(vec!["aarch64"])).skip_reason(&linux),
+            Some("arch: aarch64".to_string())
+        );
+    }
+
+    #[test]
+    fn excluded_command_is_skipped_and_chain_continues() -> TestResult {
+        use super::{Host, ShellFamily};
+        // The first command is gated to windows (skipped on this linux host); the
+        // second still runs, so the run reports its success.
+        let toml = "[[target.go.command]]\nname = \"win only\"\nplatform = [\"windows\"]\ncmd = [\"false\"]\n\
+                    [[target.go.command]]\nname = \"always\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let host = Host {
+            os: "linux",
+            family: "unix",
+            arch: "x86_64",
+        };
+        let status = rakefile
+            .run_with(&["go"], ShellFamily::Posix, host)?
+            .status
+            .ok_or("expected a status")?;
+        assert!(status.success());
+        Ok(())
+    }
+
+    #[test]
+    fn matching_command_runs() -> TestResult {
+        use super::{Host, ShellFamily};
+        // Gated to the host's platform, so it runs and its non-zero exit shows.
+        let toml =
+            "[[target.go.command]]\nname = \"boom\"\nplatform = [\"linux\"]\nsh = \"exit 3\"\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let host = Host {
+            os: "linux",
+            family: "unix",
+            arch: "x86_64",
+        };
+        let status = rakefile
+            .run_with(&["go"], ShellFamily::Posix, host)?
+            .status
+            .ok_or("expected a status")?;
+        assert!(!status.success());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_platform_token_rejected() -> TestResult {
+        let toml = "[[target.go.command]]\nname = \"c\"\nplatform = [\"linx\"]\ncmd = [\"true\"]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::InvalidPlatform { command, token, .. }) => {
+                assert_eq!(command, "c");
+                assert_eq!(token, "linx");
+                Ok(())
+            }
+            other => Err(format!("expected InvalidPlatform, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn invalid_arch_token_rejected() -> TestResult {
+        let toml = "[[target.go.command]]\nname = \"c\"\narch = [\"x86_65\"]\ncmd = [\"true\"]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::InvalidArch { command, token, .. }) => {
+                assert_eq!(command, "c");
+                assert_eq!(token, "x86_65");
+                Ok(())
+            }
+            other => Err(format!("expected InvalidArch, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn empty_platform_list_rejected() -> TestResult {
+        let toml = "[[target.go.command]]\nname = \"c\"\nplatform = []\ncmd = [\"true\"]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::EmptyPlatformList { command, key, .. }) => {
+                assert_eq!(command, "c");
+                assert_eq!(key, "platform");
+                Ok(())
+            }
+            other => Err(format!("expected EmptyPlatformList, got {other:?}").into()),
         }
     }
 }

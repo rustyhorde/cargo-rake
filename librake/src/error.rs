@@ -79,6 +79,43 @@ pub enum Error {
         /// The detected shell's variant key: `sh`, `fish`, or `ps`.
         shell: &'static str,
     },
+    /// A command's `platform` list named an unrecognized token (likely a typo).
+    #[error(
+        "target '{target}' command '{command}' has invalid platform '{token}' (valid: an OS like linux, macos, windows, freebsd, … or a family like unix, windows)"
+    )]
+    InvalidPlatform {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// The unrecognized platform token.
+        token: String,
+    },
+    /// A command's `arch` list named an unrecognized token (likely a typo).
+    #[error(
+        "target '{target}' command '{command}' has invalid arch '{token}' (valid: x86_64, aarch64, arm, x86, riscv64, …)"
+    )]
+    InvalidArch {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// The unrecognized architecture token.
+        token: String,
+    },
+    /// A command declared an empty `platform` or `arch` list, which would gate
+    /// the command out on every host.
+    #[error(
+        "target '{target}' command '{command}' has an empty '{key}' list (omit it to run everywhere, or list at least one token)"
+    )]
+    EmptyPlatformList {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// Which gating key was empty: `platform` or `arch`.
+        key: &'static str,
+    },
     /// A target declared two commands with the same `name`.
     #[error(
         "target '{target}' declares duplicate command name '{command}' (each [[target.{target}.command]] must have a unique name)"

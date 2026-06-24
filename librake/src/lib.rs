@@ -264,8 +264,8 @@ use std::process::ExitStatus;
 pub use crate::{
     error::{Error, Result},
     rakefile::{
-        Command, Rakefile, RunReport, ShellFamily, Target, detect_shell_family, format_duration,
-        print_runtime, print_total_runtime,
+        Command, Host, Rakefile, RunReport, ShellFamily, Target, detect_shell_family,
+        format_duration, print_runtime, print_total_runtime,
     },
     tool::{CargoTool, OsTool, SemverCheck, ToolTable},
     toolchain::ensure_rust_toolchain,
@@ -308,11 +308,16 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
             let _ = writeln!(out, "    tools: {}", target.tools.join(", "));
         }
         for command in &target.commands {
-            let marker = if command.skip_on_error {
-                " (skip_on_error)"
-            } else {
-                ""
-            };
+            let mut marker = String::new();
+            if let Some(platforms) = &command.platform {
+                let _ = write!(marker, " (platform: {})", platforms.join(", "));
+            }
+            if let Some(arches) = &command.arch {
+                let _ = write!(marker, " (arch: {})", arches.join(", "));
+            }
+            if command.skip_on_error {
+                marker.push_str(" (skip_on_error)");
+            }
             let _ = writeln!(out, "    {}: {}{marker}", command.name, command.display());
         }
     }

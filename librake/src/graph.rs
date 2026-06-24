@@ -162,6 +162,8 @@ mod tests {
                 fish: None,
                 ps: None,
                 skip_on_error: false,
+                platform: None,
+                arch: None,
             }],
             depends_on: depends_on.iter().map(|d| (*d).to_string()).collect(),
             tools: Vec::new(),

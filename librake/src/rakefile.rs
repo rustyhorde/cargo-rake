@@ -369,12 +369,28 @@ impl Rakefile {
     /// # Errors
     /// As [`run`](Self::run).
     pub fn run_with_family(&self, names: &[&str], family: ShellFamily) -> Result<RunReport> {
+        // Resolve the order before the timer: a pre-execution error (an unknown
+        // target) aborts without printing a total `Runtime` line.
         let order = graph::execution_order(&self.targets, names)?;
         let start = Instant::now();
+        let result = self.run_steps(&order, family);
+        let elapsed = start.elapsed();
+        // Print the total runtime on every path that started executing, so an
+        // aborting command (spawn failure, missing shell variant, failed tool
+        // ensure) still reports how long the run took before the error surfaces.
+        print_total_runtime(elapsed);
+        result.map(|status| RunReport { status, elapsed })
+    }
+
+    /// Run the resolved `order` of targets under shell `family`, ensuring each
+    /// referenced tool at most once per run. Returns the last command's status
+    /// (or `None` when no command ran), stopping at the first command that fails
+    /// without `skip_on_error`.
+    fn run_steps(&self, order: &[&str], family: ShellFamily) -> Result<Option<ExitStatus>> {
         let mut status = None;
         let mut ensured: HashSet<&str> = HashSet::new();
         for step in order {
-            let Some(target) = self.targets.get(step) else {
+            let Some(target) = self.targets.get(*step) else {
                 continue;
             };
             // Ensure each referenced tool is available, at most once per run.
@@ -391,10 +407,7 @@ impl Rakefile {
                 break;
             }
         }
-        Ok(RunReport {
-            status,
-            elapsed: start.elapsed(),
-        })
+        Ok(status)
     }
 }
 
@@ -453,9 +466,21 @@ fn validate_command(target: &str, command: &Command) -> Result<()> {
 fn run_one(name: &str, target: &Target, family: ShellFamily) -> Result<(Option<ExitStatus>, bool)> {
     let mut last = None;
     for command in &target.commands {
+        // Resolve the invocation before the timer: a command with no variant for
+        // the detected shell never starts, so it gets no `Cmd Runtime` line.
+        let (program, args) = command
+            .invocation(family)
+            .ok_or_else(|| Error::MissingShellVariant {
+                target: name.to_string(),
+                command: command.name.clone(),
+                shell: family.key(),
+            })?;
         let start = Instant::now();
-        let status = spawn_command(name, command, family)?;
+        let result = spawn_resolved(name, command, &program, &args);
+        // Print the per-command runtime even when the spawn fails, so a command
+        // that was attempted but could not launch still reports its time.
         print_runtime("Cmd Runtime", start.elapsed());
+        let status = result?;
         last = Some(status);
         if !status.success() && !command.skip_on_error {
             return Ok((Some(status), true));
@@ -583,19 +608,17 @@ pub(crate) fn print_label(label: &str, info: &str) {
     print_justified(BOLD_CYAN, label, info, None);
 }
 
-/// Spawn a single named command, inheriting the parent's stdio. A blank line and
-/// the command's status line (`Running [ <name> ] <program args>`, the name
-/// green on a TTY) are printed first. A shell command is run through `family`'s
-/// interpreter; a `cmd` lacking a variant for `family` is a
-/// [`Error::MissingShellVariant`].
-fn spawn_command(target: &str, command: &Command, family: ShellFamily) -> Result<ExitStatus> {
-    let (program, args) = command
-        .invocation(family)
-        .ok_or_else(|| Error::MissingShellVariant {
-            target: target.to_string(),
-            command: command.name.clone(),
-            shell: family.key(),
-        })?;
+/// Spawn a single named command from its already-resolved `program`/`args`,
+/// inheriting the parent's stdio. A blank line and the command's status line
+/// (`Running [ <name> ] <program args>`, the name green on a TTY) are printed
+/// first. Resolution (and the [`Error::MissingShellVariant`] it can raise) is the
+/// caller's responsibility, so this only fails with [`Error::Spawn`].
+fn spawn_resolved(
+    target: &str,
+    command: &Command,
+    program: &str,
+    args: &[String],
+) -> Result<ExitStatus> {
     // A blank line separates each command block from the previous output.
     let _ = writeln!(stderr()).ok();
     let name = if color_stderr() {
@@ -605,18 +628,18 @@ fn spawn_command(target: &str, command: &Command, family: ShellFamily) -> Result
     };
     // Show the resolved invocation (`sh -c <line>`, `pwsh -Command <line>`, or
     // the direct program + args) so the line reflects what actually runs.
-    let invocation = std::iter::once(program.as_str())
+    let invocation = std::iter::once(program)
         .chain(args.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ");
     print_label("Running", &format!("{name} {invocation}"));
-    ProcessCommand::new(&program)
-        .args(&args)
+    ProcessCommand::new(program)
+        .args(args)
         .status()
         .map_err(|source| Error::Spawn {
             target: target.to_string(),
             command: command.name.clone(),
-            program: program.clone(),
+            program: program.to_string(),
             source,
         })
 }

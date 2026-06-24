@@ -190,6 +190,27 @@ fn failing_target_propagates_exit_code() -> TestResult {
     Ok(())
 }
 
+/// A target whose command names a program that cannot be launched aborts the run
+/// with a spawn error. Even on that error path the run still prints the failed
+/// command's `Cmd Runtime` and the total `Runtime` before the error message.
+#[test]
+fn spawn_failure_still_prints_runtimes() -> TestResult {
+    let toml = "[[target.ghost.command]]\nname = \"missing\"\n\
+                cmd = [\"this-program-does-not-exist-cargo-rake\"]\n";
+    let dir = rakefile_dir(toml)?;
+    rake(&dir)?
+        .arg("ghost")
+        .assert()
+        .failure()
+        // The command was attempted, so its per-command runtime prints...
+        .stderr(predicate::str::contains(" Cmd Runtime "))
+        // ...and the total runtime prints even though the run aborts...
+        .stderr(predicate::str::contains("     Runtime "))
+        // ...with the spawn error surfaced afterwards.
+        .stderr(predicate::str::contains("could not launch"));
+    Ok(())
+}
+
 #[test]
 fn skip_on_error_continues_chain() -> TestResult {
     let dir = rakefile_dir(SAMPLE)?;

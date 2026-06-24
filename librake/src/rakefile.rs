@@ -503,11 +503,22 @@ impl Rakefile {
     /// # Errors
     /// As [`run`](Self::run).
     pub fn run_with(&self, names: &[&str], family: ShellFamily, host: Host) -> Result<RunReport> {
+        // A `^name` token marks a target to skip rather than a root to run; the
+        // rest are roots. With only skips named, fall back to the default target.
+        let (mut roots, skips) = split_skip_targets(names);
+        if roots.is_empty() {
+            roots.push(crate::DEFAULT_TARGET);
+        }
         // Resolve the order before the timer: a pre-execution error (an unknown
-        // target) aborts without printing a total `Runtime` line.
-        let order = graph::execution_order(&self.targets, names)?;
+        // target, or a skip nothing else can do without) aborts without printing
+        // a total `Runtime` line.
+        let plan = graph::execution_order_with_skips(&self.targets, &roots, &skips)?;
         let start = Instant::now();
-        let result = self.run_steps(&order, family, &host);
+        // Announce each requested skip that was actually part of the run graph.
+        for target in &plan.skipped {
+            print_target_skipped(target);
+        }
+        let result = self.run_steps(&plan.order, family, &host);
         let elapsed = start.elapsed();
         // Print the total runtime on every path that started executing, so an
         // aborting command (spawn failure, missing shell variant, failed tool
@@ -548,6 +559,22 @@ impl Rakefile {
         }
         Ok(status)
     }
+}
+
+/// Partition the requested target names into `(roots, skips)`: a token with a
+/// leading `^` names a target to skip (the `^` stripped), every other token a
+/// root to run. A bare `^` carries no name and is dropped.
+fn split_skip_targets<'a>(names: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
+    let mut roots = Vec::new();
+    let mut skips = Vec::new();
+    for name in names {
+        match name.strip_prefix('^') {
+            Some(skip) if !skip.is_empty() => skips.push(skip),
+            Some(_) => {}
+            None => roots.push(*name),
+        }
+    }
+    (roots, skips)
 }
 
 /// Validate a single command: it must carry exactly one *kind* of body — a
@@ -820,6 +847,14 @@ fn print_skipped(command: &str, reason: &str) {
         format!("[ {command} ]")
     };
     print_label("Skipped", &format!("{name} {reason}"));
+}
+
+/// Print a `Skipped` status line for a whole target pruned from the run by a
+/// `^name` skip request, in the same shape as [`print_skipped`]: a blank
+/// separator line, then the label with the target's name (green on a TTY) and a
+/// `skip requested` reason.
+fn print_target_skipped(target: &str) {
+    print_skipped(target, "skip requested");
 }
 
 /// Spawn a single named command from its already-resolved `program`/`args`,
@@ -1597,6 +1632,52 @@ cmd = ["cargo", "doc"]
             .ok_or("expected a status")?;
         assert!(status.success());
         Ok(())
+    }
+
+    #[test]
+    fn skipped_target_command_does_not_run() -> TestResult {
+        use super::{Host, ShellFamily};
+        // `clean` would fail if it ran; skipping it via `^clean` lets `all`
+        // (which still runs `build`) succeed.
+        let toml = "[[target.clean.command]]\nname = \"boom\"\ncmd = [\"false\"]\n\
+                    [[target.build.command]]\nname = \"ok\"\ncmd = [\"true\"]\n\
+                    [target.all]\ndepends_on = [\"clean\", \"build\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let host = Host {
+            os: "linux",
+            family: "unix",
+            arch: "x86_64",
+        };
+        let status = rakefile
+            .run_with(&["all", "^clean"], ShellFamily::Posix, host)?
+            .status
+            .ok_or("expected a status")?;
+        assert!(status.success());
+        Ok(())
+    }
+
+    #[test]
+    fn blocked_skip_surfaces_error() -> TestResult {
+        use super::{Host, ShellFamily};
+        // `build` (not a root) depends on `clean`, so skipping clean is rejected.
+        let toml = "[[target.clean.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+                    [target.build]\ndepends_on = [\"clean\"]\n\
+                    [[target.build.command]]\nname = \"b\"\ncmd = [\"true\"]\n\
+                    [target.all]\ndepends_on = [\"build\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let host = Host {
+            os: "linux",
+            family: "unix",
+            arch: "x86_64",
+        };
+        match rakefile.run_with(&["all", "^clean"], ShellFamily::Posix, host) {
+            Err(Error::SkipNotAllowed { target, dependents }) => {
+                assert_eq!(target, "clean");
+                assert_eq!(dependents, "build");
+                Ok(())
+            }
+            other => Err(format!("expected SkipNotAllowed, got {other:?}").into()),
+        }
     }
 
     #[test]

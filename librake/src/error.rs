@@ -146,6 +146,16 @@ pub enum Error {
         /// The cycle path, e.g. `["a", "b", "c", "a"]`.
         cycle: Vec<String>,
     },
+    /// A target requested to be skipped (e.g. `^clean`) is depended on by
+    /// another target that still runs in this invocation, so skipping it would
+    /// run that target without its prerequisite.
+    #[error("target '{target}' cannot be skipped: required by {dependents}")]
+    SkipNotAllowed {
+        /// The target that was requested to be skipped.
+        target: String,
+        /// The non-root targets that depend on it, comma-joined.
+        dependents: String,
+    },
     /// A target's program could not be launched.
     #[error("failed to run target '{target}' command '{command}': could not launch '{program}'")]
     Spawn {

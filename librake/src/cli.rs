@@ -23,7 +23,10 @@ pub struct Cli {
     #[arg(short, long)]
     pub list: bool,
     /// The targets to run (defaults to "default"). Runs the union of their
-    /// dependency graphs, each target at most once.
+    /// dependency graphs, each target at most once. Prefix a target with `^`
+    /// (e.g. `^clean`) to skip it: that target, and any dependency reachable
+    /// only through it, is pruned from the run — allowed only when no other
+    /// target that still runs depends on it.
     pub targets: Vec<String>,
 }
 

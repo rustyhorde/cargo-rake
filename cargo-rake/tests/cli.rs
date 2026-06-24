@@ -141,6 +141,49 @@ fn runs_multiple_named_targets() -> TestResult {
 }
 
 #[test]
+fn skips_target_with_caret_prefix() -> TestResult {
+    // `all` depends on `clean` and `build`; nothing else needs `clean`, so
+    // `^clean` prunes it. `clean`'s output is absent and a `Skipped` line shows.
+    let dir = rakefile_dir(
+        "[[target.clean.command]]\nname = \"wipe\"\ncmd = [\"echo\", \"CLEANING\"]\n\
+         [[target.build.command]]\nname = \"compile\"\ncmd = [\"echo\", \"BUILDING\"]\n\
+         [target.all]\ndepends_on = [\"clean\", \"build\"]\n",
+    )?;
+    cargo_rake(&dir)?
+        .arg("all")
+        .arg("^clean")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("BUILDING"))
+        .stdout(predicate::str::contains("CLEANING").not())
+        .stderr(predicate::str::contains(
+            "     Skipped [ rake ] [ clean ] skip requested",
+        ));
+    Ok(())
+}
+
+#[test]
+fn skip_required_by_other_target_fails_fast() -> TestResult {
+    // `build` (not a root) depends on `clean`, so `^clean` is rejected before
+    // anything runs.
+    let dir = rakefile_dir(
+        "[[target.clean.command]]\nname = \"wipe\"\ncmd = [\"echo\", \"CLEANING\"]\n\
+         [target.build]\ndepends_on = [\"clean\"]\n\
+         [[target.build.command]]\nname = \"compile\"\ncmd = [\"echo\", \"BUILDING\"]\n\
+         [target.all]\ndepends_on = [\"build\"]\n",
+    )?;
+    cargo_rake(&dir)?
+        .arg("all")
+        .arg("^clean")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "target 'clean' cannot be skipped: required by build",
+        ));
+    Ok(())
+}
+
+#[test]
 fn runs_default_target_when_none_given() -> TestResult {
     let dir = rakefile_dir(SAMPLE)?;
     cargo_rake(&dir)?

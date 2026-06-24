@@ -264,7 +264,8 @@ use std::process::ExitStatus;
 pub use crate::{
     error::{Error, Result},
     rakefile::{
-        Command, Rakefile, RunReport, Target, format_duration, print_runtime, print_total_runtime,
+        Command, Rakefile, RunReport, ShellFamily, Target, detect_shell_family, format_duration,
+        print_runtime, print_total_runtime,
     },
     tool::{CargoTool, OsTool, SemverCheck, ToolTable},
     toolchain::ensure_rust_toolchain,
@@ -289,7 +290,7 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 }
 
 /// Render the targets of `rakefile` for display, in declaration order, showing
-/// each target's `cmd` and any `depends_on`.
+/// each command (its `cmd` or its shell-resolved `sh`) and any `depends_on`.
 #[must_use]
 pub fn list_targets(rakefile: &Rakefile) -> String {
     let mut out = String::new();
@@ -312,12 +313,7 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
             } else {
                 ""
             };
-            let _ = writeln!(
-                out,
-                "    {}: {}{marker}",
-                command.name,
-                command.cmd.join(" ")
-            );
+            let _ = writeln!(out, "    {}: {}{marker}", command.name, command.display());
         }
     }
     out

@@ -128,7 +128,7 @@ of named **commands** plus an optional `depends_on` list:
 
 [[target.build.command]]
 name = "compile"                  # label shown in --list and errors (required)
-cmd  = ["cargo", "build", "--all-features"]   # program + args, spawned directly (required)
+cmd  = ["cargo", "build", "--all-features"]   # program + args, spawned directly
 # skip_on_error = false           # default: a non-zero exit aborts the target
 
 [target.all]
@@ -140,17 +140,34 @@ name = "release"
 cmd  = ["cargo", "build", "--release"]
 
 [[target.all.command]]
+name = "package"
+sh   = "tar czf dist.tgz target/release/*"   # POSIX shell (globs/`$(...)` expand)
+fish = "tar czf dist.tgz target/release/*"   # fish variant (selected under fish)
+
+[[target.all.command]]
 name = "test"
 cmd  = ["cargo", "test"]
 skip_on_error = true              # tolerate a failure and keep going
 ```
 
-- **`cmd`** is a program followed by its arguments. It is spawned directly — no
-  shell is involved — so it behaves the same on every platform.
+- A command sets **one kind** of body: either `cmd`, or one or more shell
+  variants (`sh` / `fish` / `ps`). `cmd` is mutually exclusive with the shell
+  variants; the shell variants may coexist.
+  - **`cmd`** is a program followed by its arguments, spawned directly — no
+    shell is involved — so it behaves the same on every platform.
+  - **`sh` / `fish` / `ps`** are each a single command line run through that
+    shell, so shell features (`$(...)` substitution, `~`/`$VAR` expansion, globs,
+    pipes) apply: `sh -c`, `fish -c`, and PowerShell `-Command` (`pwsh` if on
+    `PATH`, else `powershell`) respectively. rake **auto-detects the current
+    shell** (from `$SHELL`; PowerShell is detected via its env even though it
+    doesn't set `$SHELL`) and runs the matching variant. Selection is **strict**:
+    if the detected shell has no matching variant, the run aborts with an error —
+    so define a variant for every shell a command must run under.
 - **`[[target.<t>.command]]`** is a TOML array of tables. Each entry needs a
-  `name` (a label used in `--list` output and error messages) and a `cmd`.
-  Commands run in **array (declaration) order**. (TOML table headers are
-  absolute, so the `target.<t>.command` prefix is required on each entry.)
+  `name` (a label used in `--list` output and error messages) and a body (`cmd`
+  or one or more of `sh`/`fish`/`ps`). Commands run in **array (declaration)
+  order**. (TOML table headers are absolute, so the `target.<t>.command` prefix
+  is required on each entry.)
 - **`skip_on_error`** (per command, default `false`): when `true`, a non-zero
   exit from that command is tolerated and the target continues with its
   remaining commands instead of aborting.

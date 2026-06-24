@@ -19,18 +19,191 @@ use crate::{
 };
 
 /// A single named command within a target.
+///
+/// A command carries exactly one *kind* of body: either a [`cmd`](Self::cmd)
+/// array (spawned directly, no shell) or one or more shell variants
+/// ([`sh`](Self::sh)/[`fish`](Self::fish)/[`ps`](Self::ps)), each a command line
+/// run through that shell so it expands `$(...)`/`~`/`$VAR`/globs. At run time
+/// the variant matching the detected shell (see [`ShellFamily`]) is selected.
+/// Validation requires at least one body and rejects mixing `cmd` with any shell
+/// variant.
 #[derive(Debug, Deserialize)]
 pub struct Command {
     /// A label for this command, used in `--list` output and error messages.
     pub name: String,
     /// The command to run, as a program followed by its arguments. Spawned
     /// directly (no shell), so it behaves identically on every platform.
-    pub cmd: Vec<String>,
+    /// Mutually exclusive with `sh`/`fish`/`ps`.
+    #[serde(default)]
+    pub cmd: Option<Vec<String>>,
+    /// A command line run through POSIX `sh -c` (selected when the detected
+    /// shell is a POSIX shell). Mutually exclusive with `cmd`.
+    #[serde(default)]
+    pub sh: Option<String>,
+    /// A command line run through `fish -c` (selected when the detected shell is
+    /// fish). Mutually exclusive with `cmd`.
+    #[serde(default)]
+    pub fish: Option<String>,
+    /// A command line run through PowerShell `-Command` (selected when the
+    /// detected shell is PowerShell). Mutually exclusive with `cmd`.
+    #[serde(default)]
+    pub ps: Option<String>,
     /// When `true`, a non-zero exit from this command is tolerated: the target
     /// continues with its remaining commands instead of aborting the
     /// dependency chain. Defaults to `false`.
     #[serde(default)]
     pub skip_on_error: bool,
+}
+
+/// The shell family rake detects for the current run, naming which command
+/// variant (`sh`/`fish`/`ps`) is selected and how it is invoked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellFamily {
+    /// A POSIX shell (`sh`/`bash`/`zsh`/`dash`/…); runs the `sh` variant.
+    Posix,
+    /// The fish shell; runs the `fish` variant.
+    Fish,
+    /// PowerShell (`pwsh`/`powershell`); runs the `ps` variant.
+    Ps,
+}
+
+impl ShellFamily {
+    /// The Rakefile key naming this family's command variant.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            ShellFamily::Posix => "sh",
+            ShellFamily::Fish => "fish",
+            ShellFamily::Ps => "ps",
+        }
+    }
+
+    /// This family's command line on `command`, if the variant is defined.
+    fn variant(self, command: &Command) -> Option<&String> {
+        match self {
+            ShellFamily::Posix => command.sh.as_ref(),
+            ShellFamily::Fish => command.fish.as_ref(),
+            ShellFamily::Ps => command.ps.as_ref(),
+        }
+    }
+
+    /// The interpreter program and its command flag for this family. PowerShell
+    /// prefers `pwsh` (cross-platform) and falls back to `powershell` when
+    /// `pwsh` is not on `PATH`.
+    fn interpreter(self) -> (String, &'static str) {
+        match self {
+            ShellFamily::Posix => ("sh".to_string(), "-c"),
+            ShellFamily::Fish => ("fish".to_string(), "-c"),
+            ShellFamily::Ps => {
+                let program = if program_on_path("pwsh") {
+                    "pwsh"
+                } else {
+                    "powershell"
+                };
+                (program.to_string(), "-Command")
+            }
+        }
+    }
+}
+
+/// Whether `name` resolves to an executable on `PATH` (used to prefer `pwsh`
+/// over `powershell`). On Windows, `name.exe` is also checked.
+fn program_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        if dir.join(name).is_file() {
+            return true;
+        }
+        cfg!(windows) && dir.join(format!("{name}.exe")).is_file()
+    })
+}
+
+/// Classify a shell program's basename into a [`ShellFamily`]: `fish` → fish,
+/// `pwsh`/`powershell` → PowerShell, anything else → POSIX.
+fn classify_shell(name: &str) -> ShellFamily {
+    let name = name.to_ascii_lowercase();
+    if name.contains("fish") {
+        ShellFamily::Fish
+    } else if name == "pwsh" || name == "powershell" {
+        ShellFamily::Ps
+    } else {
+        ShellFamily::Posix
+    }
+}
+
+/// Resolve the [`ShellFamily`] from the relevant environment signals, in
+/// priority order (first match wins): a PowerShell env channel (any OS), then
+/// `PSModulePath` on non-Windows (pwsh on Linux/macOS), then `$SHELL`'s basename,
+/// then the platform default (`Ps` on Windows, else `Posix`). PowerShell is
+/// checked first because it does not set `$SHELL`.
+fn shell_family_from_env(
+    ps_channel: bool,
+    ps_module_nonwindows: bool,
+    shell: Option<&str>,
+    is_windows: bool,
+) -> ShellFamily {
+    if ps_channel || ps_module_nonwindows {
+        return ShellFamily::Ps;
+    }
+    match shell.filter(|s| !s.is_empty()) {
+        Some(shell) => {
+            let base = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
+            classify_shell(base)
+        }
+        None if is_windows => ShellFamily::Ps,
+        None => ShellFamily::Posix,
+    }
+}
+
+/// Detect the current shell family from the process environment.
+#[must_use]
+pub fn detect_shell_family() -> ShellFamily {
+    let ps_channel = std::env::var_os("POWERSHELL_DISTRIBUTION_CHANNEL").is_some();
+    let ps_module_nonwindows = !cfg!(windows) && std::env::var_os("PSModulePath").is_some();
+    let shell = std::env::var_os("SHELL");
+    shell_family_from_env(
+        ps_channel,
+        ps_module_nonwindows,
+        shell.as_deref().and_then(|s| s.to_str()),
+        cfg!(windows),
+    )
+}
+
+impl Command {
+    /// The program and arguments to spawn for this command under `family`. A
+    /// `cmd` body splits into its program + args; a shell body runs the family's
+    /// interpreter with its flag followed by the command line. Returns `None`
+    /// when no body applies — an empty `cmd`, or the `family` variant is absent
+    /// (callers turn that into a [`Error::MissingShellVariant`]).
+    fn invocation(&self, family: ShellFamily) -> Option<(String, Vec<String>)> {
+        if let Some(cmd) = &self.cmd {
+            let (program, args) = cmd.split_first()?;
+            Some((program.clone(), args.to_vec()))
+        } else {
+            let line = family.variant(self)?;
+            let (program, flag) = family.interpreter();
+            Some((program, vec![flag.to_string(), line.clone()]))
+        }
+    }
+
+    /// How this command renders in `--list` (shell-agnostic): a `cmd` body joins
+    /// its program + args; a shell command joins each defined variant as
+    /// `"{key}: {line}"` (e.g. `sh: $(pwd) … | fish: (pwd) …`).
+    #[must_use]
+    pub fn display(&self) -> String {
+        if let Some(cmd) = &self.cmd {
+            return cmd.join(" ");
+        }
+        let mut parts = Vec::new();
+        for (key, line) in [("sh", &self.sh), ("fish", &self.fish), ("ps", &self.ps)] {
+            if let Some(line) = line {
+                parts.push(format!("{key}: {line}"));
+            }
+        }
+        parts.join(" | ")
+    }
 }
 
 /// A single named target from the `Rakefile.toml`.
@@ -124,12 +297,7 @@ impl Rakefile {
             }
             let mut seen: HashSet<&str> = HashSet::new();
             for command in &target.commands {
-                if command.cmd.is_empty() {
-                    return Err(Error::EmptyCmd {
-                        target: name.clone(),
-                        command: command.name.clone(),
-                    });
-                }
+                validate_command(name, command)?;
                 if !seen.insert(command.name.as_str()) {
                     return Err(Error::DuplicateCommand {
                         target: name.clone(),
@@ -187,8 +355,20 @@ impl Rakefile {
     ///
     /// # Errors
     /// Returns [`Error::UnknownTarget`] if any entry in `names` is not defined,
-    /// or [`Error::Spawn`] if a command's program cannot be launched.
+    /// [`Error::MissingShellVariant`] if a selected command has no variant for
+    /// the detected shell, or [`Error::Spawn`] if a command's program cannot be
+    /// launched.
     pub fn run(&self, names: &[&str]) -> Result<RunReport> {
+        self.run_with_family(names, detect_shell_family())
+    }
+
+    /// Like [`run`](Self::run) but with an explicit [`ShellFamily`] rather than
+    /// detecting it from the environment, so callers (and tests) can pin which
+    /// shell variant is selected.
+    ///
+    /// # Errors
+    /// As [`run`](Self::run).
+    pub fn run_with_family(&self, names: &[&str], family: ShellFamily) -> Result<RunReport> {
         let order = graph::execution_order(&self.targets, names)?;
         let start = Instant::now();
         let mut status = None;
@@ -203,7 +383,7 @@ impl Rakefile {
                     self.tools.ensure(name)?;
                 }
             }
-            let (current, stop) = run_one(step, target)?;
+            let (current, stop) = run_one(step, target, family)?;
             if current.is_some() {
                 status = current;
             }
@@ -218,14 +398,63 @@ impl Rakefile {
     }
 }
 
-/// Run a target's commands in array order. Returns the last status run (or
-/// `None` when the target is a dependency-only aggregator with no commands) and
-/// whether execution should stop (a command failed without `skip_on_error`).
-fn run_one(name: &str, target: &Target) -> Result<(Option<ExitStatus>, bool)> {
+/// Validate a single command: it must carry exactly one *kind* of body — a
+/// non-empty `cmd` array, or one or more non-blank shell variants
+/// (`sh`/`fish`/`ps`) — and must not mix `cmd` with a shell variant.
+fn validate_command(target: &str, command: &Command) -> Result<()> {
+    let shells = [
+        ("sh", &command.sh),
+        ("fish", &command.fish),
+        ("ps", &command.ps),
+    ];
+    let has_shell = shells.iter().any(|(_, body)| body.is_some());
+    match &command.cmd {
+        Some(_) if has_shell => {
+            return Err(Error::AmbiguousCommandBody {
+                target: target.to_string(),
+                command: command.name.clone(),
+            });
+        }
+        Some(cmd) if cmd.is_empty() => {
+            return Err(Error::EmptyCmd {
+                target: target.to_string(),
+                command: command.name.clone(),
+            });
+        }
+        Some(_) => return Ok(()),
+        None if !has_shell => {
+            return Err(Error::MissingCommandBody {
+                target: target.to_string(),
+                command: command.name.clone(),
+            });
+        }
+        None => {}
+    }
+    // No `cmd`, at least one shell variant: each declared variant must be
+    // non-blank.
+    for (variant, body) in shells {
+        if let Some(line) = body
+            && line.trim().is_empty()
+        {
+            return Err(Error::EmptyShell {
+                target: target.to_string(),
+                command: command.name.clone(),
+                variant,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Run a target's commands in array order under shell `family`. Returns the last
+/// status run (or `None` when the target is a dependency-only aggregator with no
+/// commands) and whether execution should stop (a command failed without
+/// `skip_on_error`).
+fn run_one(name: &str, target: &Target, family: ShellFamily) -> Result<(Option<ExitStatus>, bool)> {
     let mut last = None;
     for command in &target.commands {
         let start = Instant::now();
-        let status = spawn_command(name, command)?;
+        let status = spawn_command(name, command, family)?;
         print_runtime("Cmd Runtime", start.elapsed());
         last = Some(status);
         if !status.success() && !command.skip_on_error {
@@ -356,12 +585,17 @@ pub(crate) fn print_label(label: &str, info: &str) {
 
 /// Spawn a single named command, inheriting the parent's stdio. A blank line and
 /// the command's status line (`Running [ <name> ] <program args>`, the name
-/// green on a TTY) are printed first.
-fn spawn_command(target: &str, command: &Command) -> Result<ExitStatus> {
-    let (program, args) = command.cmd.split_first().ok_or_else(|| Error::EmptyCmd {
-        target: target.to_string(),
-        command: command.name.clone(),
-    })?;
+/// green on a TTY) are printed first. A shell command is run through `family`'s
+/// interpreter; a `cmd` lacking a variant for `family` is a
+/// [`Error::MissingShellVariant`].
+fn spawn_command(target: &str, command: &Command, family: ShellFamily) -> Result<ExitStatus> {
+    let (program, args) = command
+        .invocation(family)
+        .ok_or_else(|| Error::MissingShellVariant {
+            target: target.to_string(),
+            command: command.name.clone(),
+            shell: family.key(),
+        })?;
     // A blank line separates each command block from the previous output.
     let _ = writeln!(stderr()).ok();
     let name = if color_stderr() {
@@ -369,9 +603,15 @@ fn spawn_command(target: &str, command: &Command) -> Result<ExitStatus> {
     } else {
         format!("[ {} ]", command.name)
     };
-    print_label("Running", &format!("{name} {}", command.cmd.join(" ")));
-    ProcessCommand::new(program)
-        .args(args)
+    // Show the resolved invocation (`sh -c <line>`, `pwsh -Command <line>`, or
+    // the direct program + args) so the line reflects what actually runs.
+    let invocation = std::iter::once(program.as_str())
+        .chain(args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    print_label("Running", &format!("{name} {invocation}"));
+    ProcessCommand::new(&program)
+        .args(&args)
         .status()
         .map_err(|source| Error::Spawn {
             target: target.to_string(),
@@ -864,6 +1104,163 @@ cmd = ["cargo", "doc"]
             .status
             .ok_or("expected a status")?;
         assert!(status.success());
+        Ok(())
+    }
+
+    #[test]
+    fn classify_shell_maps_families() {
+        use super::{ShellFamily, classify_shell};
+        assert_eq!(classify_shell("fish"), ShellFamily::Fish);
+        assert_eq!(classify_shell("FISH"), ShellFamily::Fish);
+        assert_eq!(classify_shell("pwsh"), ShellFamily::Ps);
+        assert_eq!(classify_shell("powershell"), ShellFamily::Ps);
+        for posix in ["sh", "bash", "zsh", "dash", "ksh", "tcsh"] {
+            assert_eq!(classify_shell(posix), ShellFamily::Posix);
+        }
+    }
+
+    #[test]
+    fn shell_family_from_env_precedence() {
+        use super::{ShellFamily, shell_family_from_env};
+        // A PowerShell env channel wins over `$SHELL` (PowerShell never sets it).
+        assert_eq!(
+            shell_family_from_env(true, false, Some("/usr/bin/fish"), false),
+            ShellFamily::Ps
+        );
+        // `PSModulePath` selects PowerShell only on non-Windows.
+        assert_eq!(
+            shell_family_from_env(false, true, Some("/bin/bash"), false),
+            ShellFamily::Ps
+        );
+        // Otherwise `$SHELL`'s basename classifies the family.
+        assert_eq!(
+            shell_family_from_env(false, false, Some("/usr/bin/fish"), false),
+            ShellFamily::Fish
+        );
+        assert_eq!(
+            shell_family_from_env(false, false, Some("/bin/zsh"), false),
+            ShellFamily::Posix
+        );
+        // Unset `$SHELL` falls back to the platform default.
+        assert_eq!(
+            shell_family_from_env(false, false, None, true),
+            ShellFamily::Ps
+        );
+        assert_eq!(
+            shell_family_from_env(false, false, None, false),
+            ShellFamily::Posix
+        );
+        // An empty `$SHELL` is treated as unset.
+        assert_eq!(
+            shell_family_from_env(false, false, Some(""), false),
+            ShellFamily::Posix
+        );
+    }
+
+    #[test]
+    fn command_with_no_body_is_rejected() -> TestResult {
+        let toml = "[[target.build.command]]\nname = \"c\"\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::MissingCommandBody { target, command }) => {
+                assert_eq!(target, "build");
+                assert_eq!(command, "c");
+                Ok(())
+            }
+            other => Err(format!("expected MissingCommandBody, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn command_mixing_cmd_and_shell_variant_is_rejected() -> TestResult {
+        let toml = "[[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\nfish = \"true\"\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::AmbiguousCommandBody { target, command }) => {
+                assert_eq!(target, "build");
+                assert_eq!(command, "c");
+                Ok(())
+            }
+            other => Err(format!("expected AmbiguousCommandBody, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn blank_shell_variant_is_rejected() -> TestResult {
+        let toml = "[[target.build.command]]\nname = \"c\"\nfish = \"   \"\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::EmptyShell {
+                target,
+                command,
+                variant,
+            }) => {
+                assert_eq!(target, "build");
+                assert_eq!(command, "c");
+                assert_eq!(variant, "fish");
+                Ok(())
+            }
+            other => Err(format!("expected EmptyShell, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn coexisting_shell_variants_are_accepted() -> TestResult {
+        let toml = "[[target.build.command]]\nname = \"c\"\n\
+                    sh = \"true\"\nfish = \"true\"\nps = \"$true\"\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let build = rakefile.target("build").ok_or("expected 'build'")?;
+        let command = build.commands.first().ok_or("expected a command")?;
+        // All three variants render in `--list`.
+        assert_eq!(command.display(), "sh: true | fish: true | ps: $true");
+        Ok(())
+    }
+
+    #[test]
+    fn missing_variant_for_detected_shell_errors() -> TestResult {
+        use super::ShellFamily;
+        // The command defines only a `fish` variant, but a POSIX shell is
+        // selected, so there is no `sh` variant to run.
+        let toml = "[[target.go.command]]\nname = \"only fish\"\nfish = \"echo hi\"\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        match rakefile.run_with_family(&["go"], ShellFamily::Posix) {
+            Err(Error::MissingShellVariant {
+                target,
+                command,
+                shell,
+            }) => {
+                assert_eq!(target, "go");
+                assert_eq!(command, "only fish");
+                assert_eq!(shell, "sh");
+                Ok(())
+            }
+            other => Err(format!("expected MissingShellVariant, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn sh_variant_expands_and_runs() -> TestResult {
+        use super::ShellFamily;
+        // `$(...)` only expands through a shell; `sh -c` runs this and `test`
+        // exits 0 when the substitution worked.
+        let toml =
+            "[[target.go.command]]\nname = \"expand\"\nsh = \"test \\\"$(echo ok)\\\" = ok\"\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let status = rakefile
+            .run_with_family(&["go"], ShellFamily::Posix)?
+            .status
+            .ok_or("expected a status")?;
+        assert!(status.success());
+        Ok(())
+    }
+
+    #[test]
+    fn sh_variant_failure_propagates() -> TestResult {
+        use super::ShellFamily;
+        let toml = "[[target.go.command]]\nname = \"boom\"\nsh = \"exit 3\"\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let status = rakefile
+            .run_with_family(&["go"], ShellFamily::Posix)?
+            .status
+            .ok_or("expected a status")?;
+        assert!(!status.success());
         Ok(())
     }
 

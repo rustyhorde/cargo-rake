@@ -157,7 +157,10 @@ mod tests {
         Target {
             commands: vec![Command {
                 name: "run".to_string(),
-                cmd: vec!["true".to_string()],
+                cmd: Some(vec!["true".to_string()]),
+                sh: None,
+                fish: None,
+                ps: None,
                 skip_on_error: false,
             }],
             depends_on: depends_on.iter().map(|d| (*d).to_string()).collect(),

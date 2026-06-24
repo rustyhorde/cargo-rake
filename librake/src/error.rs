@@ -31,6 +31,54 @@ pub enum Error {
         /// The offending command's name.
         command: String,
     },
+    /// A target's command declared no body at all — none of `cmd`, `sh`, `fish`,
+    /// or `ps`.
+    #[error(
+        "target '{target}' command '{command}' declares none of 'cmd', 'sh', 'fish', or 'ps' (it must set at least one)"
+    )]
+    MissingCommandBody {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+    },
+    /// A target's command declared both a `cmd` array and a shell variant; the
+    /// two kinds are mutually exclusive.
+    #[error(
+        "target '{target}' command '{command}' declares both 'cmd' and a shell variant (sh/fish/ps); they are mutually exclusive"
+    )]
+    AmbiguousCommandBody {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+    },
+    /// A target's command declared a shell variant that is empty or only
+    /// whitespace.
+    #[error(
+        "target '{target}' command '{command}' has an empty '{variant}' (it must contain a command line to run)"
+    )]
+    EmptyShell {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// Which shell variant was blank: `sh`, `fish`, or `ps`.
+        variant: &'static str,
+    },
+    /// A command was selected to run but declares no variant for the detected
+    /// shell, so there is nothing to run under it.
+    #[error(
+        "target '{target}' command '{command}' has no '{shell}' variant for the current shell (add a '{shell}' command line, or run from a shell whose variant is defined)"
+    )]
+    MissingShellVariant {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// The detected shell's variant key: `sh`, `fish`, or `ps`.
+        shell: &'static str,
+    },
     /// A target declared two commands with the same `name`.
     #[error(
         "target '{target}' declares duplicate command name '{command}' (each [[target.{target}.command]] must have a unique name)"

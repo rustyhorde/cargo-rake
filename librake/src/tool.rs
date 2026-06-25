@@ -973,6 +973,16 @@ cmd = ["cargo", "matrix", "build"]
 
     #[test]
     fn ensure_fish_present() -> TestResult {
+        // Skip when fish is not installed in the current environment.
+        if std::process::Command::new("fish")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            return Ok(());
+        }
         // `cd` is a fish builtin always available.
         super::ensure_fish("cd", &super::FishTool { hint: None }, 0)?;
         Ok(())

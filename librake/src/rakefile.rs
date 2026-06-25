@@ -14,7 +14,8 @@ use serde::Deserialize;
 
 use crate::{
     error::{Error, Result},
-    graph, tool,
+    graph::{self, Step},
+    tool,
     tool::ToolTable,
 };
 
@@ -389,9 +390,18 @@ pub struct Target {
     /// The commands to run, in array (declaration) order.
     #[serde(rename = "command", default)]
     pub commands: Vec<Command>,
-    /// Other targets that must run, in order, before this one.
+    /// Other targets that must run, in order, before this one. After
+    /// [`Rakefile::from_toml_str`] normalizes the raw TOML value, this holds
+    /// only the non-`^`-prefixed entries; `^`-prefixed entries are moved to
+    /// [`skip_deps`](Self::skip_deps).
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Targets to skip from the execution graph when this target is in the
+    /// run, derived from `^`-prefixed entries in the TOML `depends_on` list.
+    /// Not a TOML key — populated by [`Rakefile::from_toml_str`] after
+    /// parsing.
+    #[serde(skip)]
+    pub skip_deps: Vec<String>,
     /// Names of `[tool.cargo.<name>]`/`[tool.os.<name>]` entries this target
     /// needs; each is ensured (installed if missing) before the target's
     /// commands run.
@@ -463,9 +473,27 @@ impl Rakefile {
     /// # Ok::<(), librake::Error>(())
     /// ```
     pub fn from_toml_str(s: &str) -> Result<Self> {
-        let rakefile: Rakefile = toml::from_str(s)?;
+        let mut rakefile: Rakefile = toml::from_str(s)?;
+        rakefile.normalize_depends_on();
         rakefile.validate()?;
         Ok(rakefile)
+    }
+
+    /// Split each target's raw `depends_on` list into actual dependencies
+    /// (stored back in `depends_on`) and skip targets (stored in `skip_deps`).
+    /// A `^`-prefixed entry names a skip; a bare `^` with no name is dropped,
+    /// matching the CLI's behavior for a bare `^` token.
+    fn normalize_depends_on(&mut self) {
+        for target in self.targets.values_mut() {
+            let raw = std::mem::take(&mut target.depends_on);
+            for dep in raw {
+                match dep.strip_prefix('^') {
+                    Some(name) if !name.is_empty() => target.skip_deps.push(name.to_string()),
+                    Some(_) => {}
+                    None => target.depends_on.push(dep),
+                }
+            }
+        }
     }
 
     /// Every target must define at least one command or dependency, each
@@ -598,7 +626,22 @@ impl Rakefile {
     /// # }
     /// ```
     pub fn run(&self, names: &[&str]) -> Result<RunReport> {
-        self.run_with_family(names, detect_shell_family())
+        self.run_impl(names, detect_shell_family(), Host::detect(), false)
+    }
+
+    /// Like [`run`](Self::run) but without executing any commands: prints the
+    /// same status lines (`Running`, `Checking`, `Skipped`, …) but skips every
+    /// spawn and every tool check/install. Useful for previewing what a run would
+    /// do. Configuration errors (unknown targets, missing shell variants) are
+    /// still reported. Returns `status: None` (treated as success by the
+    /// binaries) when no command ran — which is always the case in dry-run.
+    ///
+    /// # Errors
+    /// Returns [`Error::UnknownTarget`] for an unknown root or skip target, or
+    /// [`Error::MissingShellVariant`] when a command has no variant for the
+    /// detected shell.
+    pub fn run_dry(&self, names: &[&str]) -> Result<RunReport> {
+        self.run_impl(names, detect_shell_family(), Host::detect(), true)
     }
 
     /// Like [`run`](Self::run) but with an explicit [`ShellFamily`] rather than
@@ -623,7 +666,16 @@ impl Rakefile {
     /// # }
     /// ```
     pub fn run_with_family(&self, names: &[&str], family: ShellFamily) -> Result<RunReport> {
-        self.run_with(names, family, Host::detect())
+        self.run_impl(names, family, Host::detect(), false)
+    }
+
+    /// Like [`run_dry`](Self::run_dry) but with an explicit [`ShellFamily`]
+    /// pinned rather than detected.
+    ///
+    /// # Errors
+    /// As [`run_dry`](Self::run_dry).
+    pub fn run_dry_with_family(&self, names: &[&str], family: ShellFamily) -> Result<RunReport> {
+        self.run_impl(names, family, Host::detect(), true)
     }
 
     /// Like [`run`](Self::run) but with both the [`ShellFamily`] and the [`Host`]
@@ -648,6 +700,44 @@ impl Rakefile {
     /// # }
     /// ```
     pub fn run_with(&self, names: &[&str], family: ShellFamily, host: Host) -> Result<RunReport> {
+        self.run_impl(names, family, host, false)
+    }
+
+    /// Like [`run_dry`](Self::run_dry) but with both [`ShellFamily`] and [`Host`]
+    /// pinned — the test seam for dry-run unit tests.
+    ///
+    /// # Errors
+    /// As [`run_dry`](Self::run_dry).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use librake::{Rakefile, ShellFamily, Host};
+    ///
+    /// # fn main() -> librake::Result<()> {
+    /// let toml = "[[target.build.command]]\nname=\"compile\"\ncmd=[\"cargo\",\"build\"]";
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
+    /// let report = rakefile.run_dry_with(&["build"], ShellFamily::Posix, Host::detect())?;
+    /// assert!(report.status.is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn run_dry_with(
+        &self,
+        names: &[&str],
+        family: ShellFamily,
+        host: Host,
+    ) -> Result<RunReport> {
+        self.run_impl(names, family, host, true)
+    }
+
+    fn run_impl(
+        &self,
+        names: &[&str],
+        family: ShellFamily,
+        host: Host,
+        dry_run: bool,
+    ) -> Result<RunReport> {
         // A `^name` token marks a target to skip rather than a root to run; the
         // rest are roots. With only skips named, fall back to the default target.
         let (mut roots, skips) = split_skip_targets(names);
@@ -658,48 +748,77 @@ impl Rakefile {
         // target, or a skip nothing else can do without) aborts without printing
         // a total `Runtime` line.
         let plan = graph::execution_order_with_skips(&self.targets, &roots, &skips)?;
+        let cmd_name_width = plan
+            .steps
+            .iter()
+            .filter_map(|step| {
+                if let Step::Run(name) = step {
+                    self.targets.get(*name)
+                } else {
+                    None
+                }
+            })
+            .flat_map(|t| t.commands.iter())
+            .map(|c| c.name.len())
+            .max()
+            .unwrap_or(0);
+        let skip_name_width = plan
+            .steps
+            .iter()
+            .filter_map(|step| {
+                if let Step::Skip(name) = step {
+                    Some(name.len())
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        let name_width = cmd_name_width.max(skip_name_width);
         let start = Instant::now();
-        // Announce each requested skip that was actually part of the run graph.
-        for target in &plan.skipped {
-            print_target_skipped(target);
-        }
-        let result = self.run_steps(&plan.order, family, &host);
+        let result = self.run_steps(&plan.steps, family, &host, dry_run, name_width);
         let elapsed = start.elapsed();
-        // Print the total runtime on every path that started executing, so an
-        // aborting command (spawn failure, missing shell variant, failed tool
-        // ensure) still reports how long the run took before the error surfaces.
-        print_total_runtime(elapsed);
+        // Print the total runtime on every path that started executing. In dry-run
+        // mode there is no real work to time, so the line is skipped.
+        if !dry_run {
+            print_total_runtime(elapsed);
+        }
         result.map(|status| RunReport { status, elapsed })
     }
 
-    /// Run the resolved `order` of targets under shell `family` on `host`,
-    /// ensuring each referenced tool at most once per run. Returns the last
-    /// command's status (or `None` when no command ran), stopping at the first
-    /// command that fails without `skip_on_error`.
     fn run_steps(
         &self,
-        order: &[&str],
+        steps: &[Step<'_>],
         family: ShellFamily,
         host: &Host,
+        dry_run: bool,
+        name_width: usize,
     ) -> Result<Option<ExitStatus>> {
         let mut status = None;
         let mut ensured: HashSet<&str> = HashSet::new();
-        for step in order {
-            let Some(target) = self.targets.get(*step) else {
-                continue;
-            };
-            // Ensure each referenced tool is available, at most once per run.
-            for name in &target.tools {
-                if ensured.insert(name.as_str()) {
-                    self.tools.ensure(name)?;
+        for step in steps {
+            match step {
+                Step::Skip(name) => {
+                    print_target_skipped(name, name_width);
                 }
-            }
-            let (current, stop) = run_one(step, target, family, host)?;
-            if current.is_some() {
-                status = current;
-            }
-            if stop {
-                break;
+                Step::Run(name) => {
+                    let Some(target) = self.targets.get(*name) else {
+                        continue;
+                    };
+                    // Ensure each referenced tool is available, at most once per run.
+                    for tool in &target.tools {
+                        if ensured.insert(tool.as_str()) {
+                            self.tools.ensure(tool, dry_run, name_width)?;
+                        }
+                    }
+                    let (current, stop) = run_one(name, target, family, host, dry_run, name_width)?;
+                    if current.is_some() {
+                        status = current;
+                    }
+                    if stop {
+                        break;
+                    }
+                }
             }
         }
         Ok(status)
@@ -826,6 +945,8 @@ fn run_one(
     target: &Target,
     family: ShellFamily,
     host: &Host,
+    dry_run: bool,
+    name_width: usize,
 ) -> Result<(Option<ExitStatus>, bool)> {
     let mut last = None;
     for command in &target.commands {
@@ -833,7 +954,7 @@ fn run_one(
         // (a no-op, not a failure): the target's remaining commands and the
         // dependency chain continue. Reported with a `Skipped` status line.
         if let Some(reason) = command.skip_reason(host) {
-            print_skipped(&command.name, &reason);
+            print_skipped(&command.name, &reason, name_width);
             continue;
         }
         // Resolve the invocation before the timer: a command with no variant for
@@ -846,8 +967,25 @@ fn run_one(
                     command: command.name.clone(),
                     shell: family.key(),
                 })?;
+        if dry_run {
+            // Print the "Running" line (same output as a real run) but skip the
+            // spawn entirely. No `Cmd Runtime` is printed — there is no real
+            // time to report.
+            let _ = writeln!(stderr()).ok();
+            let cmd_name = if color_stderr() {
+                format!("{GREEN}[ {:>name_width$} ]{RESET}", command.name)
+            } else {
+                format!("[ {:>name_width$} ]", command.name)
+            };
+            let invocation = std::iter::once(program.as_str())
+                .chain(args.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ");
+            print_label("Running", &format!("{cmd_name} {invocation}"));
+            continue;
+        }
         let start = Instant::now();
-        let result = spawn_resolved(name, command, &program, &args);
+        let result = spawn_resolved(name, command, &program, &args, name_width);
         // Print the per-command runtime even when the spawn fails, so a command
         // that was attempted but could not launch still reports its time.
         print_runtime("Cmd Runtime", start.elapsed());
@@ -984,12 +1122,12 @@ pub(crate) fn print_label(label: &str, info: &str) {
 /// list, in the same shape as a `Running` line: a blank separator line, then the
 /// label with the command's name (green on a TTY) and the unmet `reason` (e.g.
 /// `platform: linux, macos`).
-fn print_skipped(command: &str, reason: &str) {
+fn print_skipped(command: &str, reason: &str, name_width: usize) {
     let _ = writeln!(stderr()).ok();
     let name = if color_stderr() {
-        format!("{GREEN}[ {command} ]{RESET}")
+        format!("{GREEN}[ {command:>name_width$} ]{RESET}")
     } else {
-        format!("[ {command} ]")
+        format!("[ {command:>name_width$} ]")
     };
     print_label("Skipped", &format!("{name} {reason}"));
 }
@@ -998,8 +1136,8 @@ fn print_skipped(command: &str, reason: &str) {
 /// `^name` skip request, in the same shape as [`print_skipped`]: a blank
 /// separator line, then the label with the target's name (green on a TTY) and a
 /// `skip requested` reason.
-fn print_target_skipped(target: &str) {
-    print_skipped(target, "skip requested");
+fn print_target_skipped(target: &str, name_width: usize) {
+    print_skipped(target, "skip requested", name_width);
 }
 
 /// Spawn a single named command from its already-resolved `program`/`args`,
@@ -1012,13 +1150,14 @@ fn spawn_resolved(
     command: &Command,
     program: &str,
     args: &[String],
+    name_width: usize,
 ) -> Result<ExitStatus> {
     // A blank line separates each command block from the previous output.
     let _ = writeln!(stderr()).ok();
     let name = if color_stderr() {
-        format!("{GREEN}[ {} ]{RESET}", command.name)
+        format!("{GREEN}[ {:>name_width$} ]{RESET}", command.name)
     } else {
-        format!("[ {} ]", command.name)
+        format!("[ {:>name_width$} ]", command.name)
     };
     // Show the resolved invocation (`sh -c <line>`, `pwsh -Command <line>`, or
     // the direct program + args) so the line reflects what actually runs.
@@ -1771,6 +1910,69 @@ cmd = ["cargo", "doc"]
     }
 
     #[test]
+    fn dry_run_does_not_execute_failing_command() -> TestResult {
+        use super::{Host, ShellFamily};
+        // A command that would fail if spawned — in dry-run mode the spawn is
+        // skipped entirely, so the report carries no status (treated as success).
+        let toml = "[[target.go.command]]\nname = \"boom\"\ncmd = [\"false\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let host = Host {
+            os: "linux",
+            family: "unix",
+            arch: "x86_64",
+        };
+        let report = rakefile.run_dry_with(&["go"], ShellFamily::Posix, host)?;
+        assert!(report.status.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn dry_run_resolves_dependency_order() -> TestResult {
+        use super::{Host, ShellFamily};
+        // A chain with all-failing commands — dry-run never spawns them, so the
+        // entire dependency graph is processed and the run still succeeds.
+        let toml = "[[target.build.command]]\nname = \"b\"\ncmd = [\"false\"]\n\
+                    [target.all]\ndepends_on = [\"build\"]\n\
+                    [[target.all.command]]\nname = \"a\"\ncmd = [\"false\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let host = Host {
+            os: "linux",
+            family: "unix",
+            arch: "x86_64",
+        };
+        let report = rakefile.run_dry_with(&["all"], ShellFamily::Posix, host)?;
+        assert!(report.status.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn dry_run_missing_shell_variant_still_errors() -> TestResult {
+        use super::{Host, ShellFamily};
+        // Even in dry-run, a command with no variant for the detected shell is a
+        // configuration error — the Rakefile is invalid regardless of execution.
+        let toml = "[[target.go.command]]\nname = \"fish only\"\nfish = \"echo hi\"\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let host = Host {
+            os: "linux",
+            family: "unix",
+            arch: "x86_64",
+        };
+        match rakefile.run_dry_with(&["go"], ShellFamily::Posix, host) {
+            Err(Error::MissingShellVariant {
+                target,
+                command,
+                shell,
+            }) => {
+                assert_eq!(target, "go");
+                assert_eq!(command, "fish only");
+                assert_eq!(shell, "sh");
+                Ok(())
+            }
+            other => Err(format!("expected MissingShellVariant, got {other:?}").into()),
+        }
+    }
+
+    #[test]
     fn excluded_command_is_skipped_and_chain_continues() -> TestResult {
         use super::{Host, ShellFamily};
         // The first command is gated to windows (skipped on this linux host); the
@@ -1894,5 +2096,85 @@ cmd = ["cargo", "doc"]
             }
             other => Err(format!("expected EmptyPlatformList, got {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn caret_in_depends_on_becomes_skip_dep() -> TestResult {
+        let toml = "[[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+                    [[target.clean.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+                    [target.ci]\ndepends_on = [\"build\", \"^clean\"]\n\
+                    [[target.ci.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let ci = rakefile.target("ci").ok_or("expected 'ci'")?;
+        assert_eq!(ci.depends_on, vec!["build".to_string()]);
+        assert_eq!(ci.skip_deps, vec!["clean".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn caret_skip_dep_prunes_from_run() -> TestResult {
+        use super::{Host, ShellFamily};
+        // `clean` would fail if it ran; `ci`'s depends_on `^clean` prunes it
+        // automatically without a CLI `^clean` token.
+        let toml = "[[target.clean.command]]\nname = \"boom\"\ncmd = [\"false\"]\n\
+             [[target.build.command]]\nname = \"ok\"\ncmd = [\"true\"]\n\
+             [target.all]\ndepends_on = [\"clean\", \"build\"]\n\
+             [[target.all.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+             [target.ci]\ndepends_on = [\"all\", \"^clean\"]\n\
+             [[target.ci.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let host = Host {
+            os: "linux",
+            family: "unix",
+            arch: "x86_64",
+        };
+        let status = rakefile
+            .run_with(&["ci"], ShellFamily::Posix, host)?
+            .status
+            .ok_or("expected a status")?;
+        assert!(status.success());
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_caret_dep_in_depends_on_is_rejected() -> TestResult {
+        let toml = "[[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+                    [target.ci]\ndepends_on = [\"build\", \"^ghost\"]\n\
+                    [[target.ci.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::UnknownDependency { target, dependency }) => {
+                assert_eq!(target, "ci");
+                assert_eq!(dependency, "ghost");
+                Ok(())
+            }
+            other => Err(format!("expected UnknownDependency, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn conflicting_dep_and_skip_dep_is_rejected() -> TestResult {
+        let toml = "[[target.clean.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+                    [target.ci]\ndepends_on = [\"clean\", \"^clean\"]\n\
+                    [[target.ci.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::ConflictingDependency { target, name }) => {
+                assert_eq!(target, "ci");
+                assert_eq!(name, "clean");
+                Ok(())
+            }
+            other => Err(format!("expected ConflictingDependency, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn bare_caret_in_depends_on_is_dropped_silently() -> TestResult {
+        let toml = "[[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+                    [target.ci]\ndepends_on = [\"build\", \"^\"]\n\
+                    [[target.ci.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let ci = rakefile.target("ci").ok_or("expected 'ci'")?;
+        assert_eq!(ci.depends_on, vec!["build".to_string()]);
+        assert!(ci.skip_deps.is_empty());
+        Ok(())
     }
 }

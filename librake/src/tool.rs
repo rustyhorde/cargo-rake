@@ -28,7 +28,7 @@ use serde::Deserialize;
 
 use crate::{
     error::{Error, Result},
-    rakefile::{Target, print_label},
+    rakefile::{GREEN, RESET, Target, color_stderr, print_label},
 };
 
 /// How a tool's `update = true` check resolves the latest available version.
@@ -180,11 +180,19 @@ impl ToolTable {
     ///
     /// # Errors
     /// Propagates the install/requirement errors of the dispatched ensure.
-    pub(crate) fn ensure(&self, name: &str) -> Result<()> {
+    pub(crate) fn ensure(&self, name: &str, dry_run: bool, name_width: usize) -> Result<()> {
+        if dry_run {
+            // In dry-run mode, announce the dependency but skip the check and
+            // any install — no processes are spawned.
+            if self.cargo.contains_key(name) || self.os.contains_key(name) {
+                eprint_tool("Checking", name, &[], name_width);
+            }
+            return Ok(());
+        }
         if let Some(tool) = self.cargo.get(name) {
-            ensure_cargo(name, tool)
+            ensure_cargo(name, tool, name_width)
         } else if let Some(tool) = self.os.get(name) {
-            ensure_os(name, tool)
+            ensure_os(name, tool, name_width)
         } else {
             Ok(())
         }
@@ -209,7 +217,7 @@ impl ToolTable {
 /// caught by [`validate`]), or [`Error::ToolInstallSpawn`] /
 /// [`Error::ToolInstallFailed`] if the install command cannot be launched or
 /// exits non-zero.
-fn ensure_cargo(name: &str, tool: &CargoTool) -> Result<()> {
+fn ensure_cargo(name: &str, tool: &CargoTool, name_width: usize) -> Result<()> {
     let Some((program, args)) = tool.check.split_first() else {
         return Err(Error::EmptyToolCommand {
             tool: name.to_string(),
@@ -217,12 +225,12 @@ fn ensure_cargo(name: &str, tool: &CargoTool) -> Result<()> {
         });
     };
 
-    eprint_tool("Checking", name, &[]);
+    eprint_tool("Checking", name, &[], name_width);
     let output = ProcessCommand::new(program).args(args).output();
     let present = output.as_ref().is_ok_and(|o| o.status.success());
 
     if !present {
-        eprint_tool("Installing", name, &tool.install);
+        eprint_tool("Installing", name, &tool.install, name_width);
         return run_install(name, &tool.install);
     }
 
@@ -231,12 +239,12 @@ fn ensure_cargo(name: &str, tool: &CargoTool) -> Result<()> {
         .and_then(|o| parse_installed_version(&o.stdout, &o.stderr));
 
     if tool.update {
-        update_if_newer(name, tool, installed.as_ref())?;
+        update_if_newer(name, tool, installed.as_ref(), name_width)?;
     } else {
         // Present and not an `update` tool: report what is already installed,
         // including the parsed version when the `check` output carried one.
         let detail = installed.map_or_else(Vec::new, |v| vec![v.to_string()]);
-        eprint_tool("Present", name, &detail);
+        eprint_tool("Present", name, &detail, name_width);
     }
     Ok(())
 }
@@ -254,7 +262,7 @@ fn ensure_cargo(name: &str, tool: &CargoTool) -> Result<()> {
 /// [`validate`]), [`Error::RequiredToolMissing`] when the tool is absent and has
 /// no `install`, or [`Error::ToolInstallSpawn`] / [`Error::ToolInstallFailed`]
 /// if a declared install cannot be launched or exits non-zero.
-fn ensure_os(name: &str, tool: &OsTool) -> Result<()> {
+fn ensure_os(name: &str, tool: &OsTool, name_width: usize) -> Result<()> {
     let Some((program, args)) = tool.check.split_first() else {
         return Err(Error::EmptyToolCommand {
             tool: name.to_string(),
@@ -262,12 +270,12 @@ fn ensure_os(name: &str, tool: &OsTool) -> Result<()> {
         });
     };
 
-    eprint_tool("Checking", name, &[]);
+    eprint_tool("Checking", name, &[], name_width);
     let output = ProcessCommand::new(program).args(args).output();
     let present = output.as_ref().is_ok_and(|o| o.status.success());
 
     if present {
-        eprint_tool("Present", name, &[]);
+        eprint_tool("Present", name, &[], name_width);
         return Ok(());
     }
 
@@ -277,7 +285,7 @@ fn ensure_os(name: &str, tool: &OsTool) -> Result<()> {
             hint: tool.hint.clone(),
         });
     }
-    eprint_tool("Installing", name, &tool.install);
+    eprint_tool("Installing", name, &tool.install, name_width);
     run_install(name, &tool.install)
 }
 
@@ -291,7 +299,12 @@ fn parse_installed_version(stdout: &[u8], stderr: &[u8]) -> Option<Version> {
 
 /// When `update = true`, re-install the tool if [`latest_version`] reports a
 /// version newer than `installed`. Version-check failures are non-fatal.
-fn update_if_newer(name: &str, tool: &CargoTool, installed: Option<&Version>) -> Result<()> {
+fn update_if_newer(
+    name: &str,
+    tool: &CargoTool,
+    installed: Option<&Version>,
+    name_width: usize,
+) -> Result<()> {
     // Without a parseable installed version there is nothing to compare against,
     // and reinstalling on every run is worse than keeping the current one — so
     // skip the update (and the registry lookup) entirely.
@@ -300,6 +313,7 @@ fn update_if_newer(name: &str, tool: &CargoTool, installed: Option<&Version>) ->
             "Warning",
             name,
             &["could not determine installed version; keeping current".to_string()],
+            name_width,
         );
         return Ok(());
     };
@@ -311,15 +325,21 @@ fn update_if_newer(name: &str, tool: &CargoTool, installed: Option<&Version>) ->
                 "Warning",
                 name,
                 &[format!("version check failed: {message}")],
+                name_width,
             );
             return Ok(());
         }
     };
     if latest > *installed {
-        eprint_tool("Updating", name, &[format!("{installed} -> {latest}")]);
+        eprint_tool(
+            "Updating",
+            name,
+            &[format!("{installed} -> {latest}")],
+            name_width,
+        );
         return run_install(name, &tool.install);
     }
-    eprint_tool("Up to date", name, &[installed.to_string()]);
+    eprint_tool("Up to date", name, &[installed.to_string()], name_width);
     Ok(())
 }
 
@@ -424,14 +444,19 @@ fn parse_version_token(stdout: &str) -> Option<Version> {
 
 /// Print a tool status line via [`print_label`]: the `label` (e.g. `Checking`,
 /// `Installing`) as a right-justified bold-cyan prefix in the shared status
-/// column, followed by the tool `name` and any `detail`. With an empty `detail`
-/// only the name is shown, e.g. `Checking matrix`.
-fn eprint_tool(label: &str, name: &str, detail: &[String]) {
+/// column, followed by a green `[ check ]` tag right-aligned to `name_width`
+/// (matching the command-name column), then the tool `name` and any `detail`.
+fn eprint_tool(label: &str, name: &str, detail: &[String], name_width: usize) {
+    let tag = if color_stderr() {
+        format!("{GREEN}[ {:>name_width$} ]{RESET}", "check")
+    } else {
+        format!("[ {:>name_width$} ]", "check")
+    };
     let detail = detail.join(" ");
     let info = if detail.is_empty() {
-        name.to_string()
+        format!("{tag} {name}")
     } else {
-        format!("{name} {detail}")
+        format!("{tag} {name} {detail}")
     };
     print_label(label, &info);
 }
@@ -608,21 +633,21 @@ cmd = ["cargo", "matrix", "build"]
     #[test]
     fn ensure_present_tool_skips_install() -> TestResult {
         // `check` succeeds, so `install` (which would fail) must not run.
-        ensure_cargo("present", &tool(&["true"], &["false"]))?;
+        ensure_cargo("present", &tool(&["true"], &["false"]), 0)?;
         Ok(())
     }
 
     #[test]
     fn ensure_absent_tool_installs() -> TestResult {
         // `check` fails (absent) so `install` runs and succeeds.
-        ensure_cargo("absent", &tool(&["false"], &["true"]))?;
+        ensure_cargo("absent", &tool(&["false"], &["true"]), 0)?;
         Ok(())
     }
 
     #[test]
     fn ensure_os_present_tool_is_ok() -> TestResult {
         // `check` succeeds, so a missing `install` is fine and no error fires.
-        ensure_os("present", &os_tool(&["true"], &[], None))?;
+        ensure_os("present", &os_tool(&["true"], &[], None), 0)?;
         Ok(())
     }
 
@@ -630,14 +655,18 @@ cmd = ["cargo", "matrix", "build"]
     fn ensure_os_absent_with_install_runs_it() -> TestResult {
         // Absent (`check` = `false`), but a declared `install` (`true`) runs and
         // succeeds.
-        ensure_os("absent", &os_tool(&["false"], &["true"], None))?;
+        ensure_os("absent", &os_tool(&["false"], &["true"], None), 0)?;
         Ok(())
     }
 
     #[test]
     fn ensure_os_absent_without_install_is_required_error() -> TestResult {
         // Absent and no `install`: abort with the requirement, carrying the hint.
-        match ensure_os("docker", &os_tool(&["false"], &[], Some("install Docker"))) {
+        match ensure_os(
+            "docker",
+            &os_tool(&["false"], &[], Some("install Docker")),
+            0,
+        ) {
             Err(Error::RequiredToolMissing { tool, hint }) => {
                 assert_eq!(tool, "docker");
                 assert_eq!(hint.as_deref(), Some("install Docker"));
@@ -650,7 +679,7 @@ cmd = ["cargo", "matrix", "build"]
     #[test]
     fn ensure_os_absent_install_failure_is_error() -> TestResult {
         // Absent with a declared `install` that fails (`false`) aborts the run.
-        match ensure_os("absent", &os_tool(&["false"], &["false"], None)) {
+        match ensure_os("absent", &os_tool(&["false"], &["false"], None), 0) {
             Err(Error::ToolInstallFailed { tool, status }) => {
                 assert_eq!(tool, "absent");
                 assert!(!status.success());
@@ -670,13 +699,13 @@ cmd = ["cargo", "matrix", "build"]
         let mut tool = tool(&["true"], &["false"]);
         tool.update = true;
         tool.crate_name = Some("anything".to_string());
-        ensure_cargo("present-no-version", &tool)?;
+        ensure_cargo("present-no-version", &tool, 0)?;
         Ok(())
     }
 
     #[test]
     fn ensure_install_failure_is_error() -> TestResult {
-        match ensure_cargo("absent", &tool(&["false"], &["false"])) {
+        match ensure_cargo("absent", &tool(&["false"], &["false"]), 0) {
             Err(Error::ToolInstallFailed { tool, status }) => {
                 assert_eq!(tool, "absent");
                 assert!(!status.success());
@@ -691,6 +720,7 @@ cmd = ["cargo", "matrix", "build"]
         match ensure_cargo(
             "absent",
             &tool(&["false"], &["this-program-does-not-exist-cargo-rake"]),
+            0,
         ) {
             Err(Error::ToolInstallSpawn { tool, program, .. }) => {
                 assert_eq!(tool, "absent");

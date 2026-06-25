@@ -140,6 +140,17 @@ pub enum Error {
         /// The missing dependency name.
         dependency: String,
     },
+    /// A target's `depends_on` lists the same name both as a regular dependency
+    /// and as a skip entry (with a `^` prefix), which is contradictory.
+    #[error(
+        "target '{target}' lists '{name}' in depends_on both as a dependency and a skip (^{name}); remove one"
+    )]
+    ConflictingDependency {
+        /// The target with the conflicting `depends_on` entry.
+        target: String,
+        /// The name that appears as both a dep and a skip.
+        name: String,
+    },
     /// The dependency graph contains a cycle.
     #[error("circular dependency detected: {}", .cycle.join(" -> "))]
     CircularDependency {

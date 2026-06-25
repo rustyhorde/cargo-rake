@@ -91,14 +91,14 @@ update = true
 check = ["docker", "--version"]
 hint = "install Docker: https://docs.docker.com/get-docker/"
 
-[[target.pull.command]]
-name = "pull"
-cmd = ["git", "pull"]
-# skip_on_error = false           # default: a non-zero exit aborts the target
+# ---------------------------------------------------------------------------
+# update
+# ---------------------------------------------------------------------------
 
-[[target.update.command]]
-name = "update"
-cmd = ["cargo", "update"]
+[[target.puc.command]]
+name = "puc"
+os = ["linux"]
+fish = "puc"
 
 [[target.fmt.command]]
 name = "fmt"
@@ -189,14 +189,14 @@ name = "perm"
 fish = "sudo chown -R $USER:$USER target/"
 sh = "sudo chown -R $USER:$USER target/"
 
-[target.puc]
-depends_on = ["pull", "clean", "update"]
-
 [target.most]
-depends_on = ["fmt", "clippy", "build", "test", "coverage"]
+depends_on = ["fmt", "clippy", "build", "test", "coverage", "musl"]
+
+[target.daily]
+depends_on = ["puc", "all", "^install"]
 
 [target.all]
-depends_on = ["fmt", "clippy", "build", "test", "coverage", "install", "musl", "clean"]
+depends_on = ["puc", "fmt", "clippy", "build", "test", "coverage", "install", "musl", "clean"]
 
 [target.default]
 depends_on = ["most"]

@@ -306,21 +306,28 @@ fn run(cli: &Cli) -> Result<()> {
         }
         Some(Action::Run(_)) | None => {}
     }
-    // `rake` may run on a machine without Rust; ensure a toolchain before any
-    // target (which almost always shells out to cargo) runs.
-    librake::ensure_rust_toolchain(rakefile.toolchain())?;
     let names: Vec<&str> = match &cli.action {
         Some(Action::Run(targets)) if !targets.is_empty() => {
             targets.iter().map(String::as_str).collect()
         }
         _ => vec![DEFAULT_TARGET],
     };
-    // `run` prints the total `Runtime` line itself (on success and on an
-    // aborting error alike), so the error still propagates after that line.
-    let report = rakefile.run(&names)?;
+    // In dry-run mode, skip toolchain setup (nothing will actually execute).
+    if !cli.dry_run {
+        // `rake` may run on a machine without Rust; ensure a toolchain before any
+        // target (which almost always shells out to cargo) runs.
+        librake::ensure_rust_toolchain(rakefile.toolchain())?;
+    }
+    // `run`/`run_dry` prints the total `Runtime` line itself (on success and on
+    // an aborting error alike), so the error still propagates after that line.
+    let report = if cli.dry_run {
+        rakefile.run_dry(&names)?
+    } else {
+        rakefile.run(&names)?
+    };
     match report.status {
         Some(status) => exit(exit_code(status)),
-        // No command ran (a depends-only target chain): treat as success.
+        // No command ran (a depends-only target chain or dry-run): treat as success.
         None => exit(0),
     }
 }

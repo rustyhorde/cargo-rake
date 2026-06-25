@@ -12,12 +12,21 @@ use vergen_gix::{Build, Cargo, Emitter, Gix, Rustc, Sysinfo};
 pub fn main() -> Result<()> {
     println!("cargo:rustc-check-cfg=cfg(coverage_nightly)");
     nightly();
+    let gix = Gix::builder()
+        .maybe_dirty(None)
+        .branch(true)
+        .commit_author_email(true)
+        .commit_author_name(true)
+        .commit_timestamp(true)
+        .describe(true, false, None)
+        .sha(false)
+        .build();
     Emitter::default()
-        .add_instructions(&Build::all_build())?
+        .add_instructions(&Build::all().build_date(false).build())?
         .add_instructions(&Cargo::all_cargo())?
-        .add_instructions(&Gix::all_git())?
-        .add_instructions(&Rustc::all_rustc())?
-        .add_instructions(&Sysinfo::all_sysinfo())?
+        .add_instructions(&gix)?
+        .add_instructions(&Rustc::all().llvm_version(false).build())?
+        .add_instructions(&Sysinfo::builder().name(true).os_version(true).build())?
         .emit()
 }
 

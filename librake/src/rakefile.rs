@@ -409,6 +409,10 @@ pub struct Target {
     pub tools: Vec<String>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// A parsed `Rakefile.toml`.
 #[derive(Debug, Deserialize)]
 pub struct Rakefile {
@@ -422,6 +426,11 @@ pub struct Rakefile {
     /// omitted (`None`) the active toolchain is used as-is.
     #[serde(default)]
     toolchain: Option<String>,
+    /// When `true` (the default), `cargo-rake` checks crates.io for a newer
+    /// version of itself on startup and installs it if found. Set `false` to
+    /// disable the check entirely.
+    #[serde(default = "default_true")]
+    update: bool,
 }
 
 /// The outcome of running a target: the exit status of the last command that
@@ -579,6 +588,31 @@ impl Rakefile {
     #[must_use]
     pub fn toolchain(&self) -> Option<&str> {
         self.toolchain.as_deref()
+    }
+
+    /// Whether `cargo-rake` should check for and apply self-updates on startup.
+    ///
+    /// Defaults to `true` when the key is absent from `Rakefile.toml`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librake::Rakefile;
+    ///
+    /// let without = Rakefile::from_toml_str(
+    ///     "[[target.b.command]]\nname=\"c\"\ncmd=[\"true\"]"
+    /// )?;
+    /// assert!(without.update()); // defaults to true
+    ///
+    /// let opt_out = Rakefile::from_toml_str(
+    ///     "update = false\n[[target.b.command]]\nname=\"c\"\ncmd=[\"true\"]"
+    /// )?;
+    /// assert!(!opt_out.update());
+    /// # Ok::<(), librake::Error>(())
+    /// ```
+    #[must_use]
+    pub fn update(&self) -> bool {
+        self.update
     }
 
     /// Look up a single target by name.
@@ -1346,6 +1380,26 @@ cmd = ["cargo", "doc"]
         // Commands within a target keep their array (declaration) order.
         let commands: Vec<&str> = all.commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(commands, vec!["release", "doc"]);
+        Ok(())
+    }
+
+    #[test]
+    fn update_defaults_to_true() -> TestResult {
+        assert!(Rakefile::from_toml_str(SAMPLE)?.update());
+        Ok(())
+    }
+
+    #[test]
+    fn update_false_is_respected() -> TestResult {
+        let src = format!("update = false\n{SAMPLE}");
+        assert!(!Rakefile::from_toml_str(&src)?.update());
+        Ok(())
+    }
+
+    #[test]
+    fn update_true_explicit_round_trips() -> TestResult {
+        let src = format!("update = true\n{SAMPLE}");
+        assert!(Rakefile::from_toml_str(&src)?.update());
         Ok(())
     }
 

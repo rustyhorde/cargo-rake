@@ -134,6 +134,10 @@ update  = true                                    # re-install when a newer crat
 check = ["docker", "--version"]
 hint  = "install Docker: https://docs.docker.com/get-docker/"  # shown when absent and no install
 
+# Fish shell function dependencies — probed with `fish -c "functions --query <name>"`
+[tool.fish.puc]
+hint = "define puc in ~/.config/fish/functions/puc.fish"
+
 # ── Targets ──────────────────────────────────────────────────────────────────
 
 [[target.build.command]]
@@ -167,6 +171,13 @@ name     = "zip"
 platform = ["windows"]
 ps       = "Compress-Archive target/release/* dist.zip"
 
+[target.puc]
+tools = ["puc"]
+
+[[target.puc.command]]
+name = "puc"
+fish = "puc"
+
 [target.all]
 depends_on = ["build", "test", "check", "package"]  # depends-only aggregator
 
@@ -199,7 +210,10 @@ depends_on = ["test"]
 - **`skip_on_error`** (per command, default `false`): when `true`, a non-zero
   exit from that command is tolerated and the target continues with its
   remaining commands instead of aborting.
-- **`depends_on`** lists other targets that must run, in order, before this one.
+- **`depends_on`** lists other targets that must run, in order, before this one. Prefix an
+  entry with `^` (e.g. `depends_on = ["all", "^install"]`) to embed a skip for that
+  dependency — the skipped target (and any dep reachable only through it) is pruned
+  whenever this target is in the run. This complements the CLI `^target` syntax.
 - **`tools`** lists external tools (by name) the target needs; see [Tools](#tools).
 - **`platform`** (optional list) names OS or family tokens (`linux`/`macos`/
   `windows`/`unix`/…); **`arch`** names architecture tokens
@@ -216,12 +230,13 @@ depends_on = ["test"]
 
 ### Tools
 
-Tools are defined in a top-level `[tool]` table, split into two categories:
+Tools are defined in a top-level `[tool]` table, split into three categories:
 **`[tool.cargo.<name>]`** for cargo-installable tools (cargo subcommands and
-the like) and **`[tool.os.<name>]`** for OS-level dependencies (`docker`,
-`pkg-config`, …) that `rake` cannot `cargo install`. A target references either
-kind by name from its `tools` list (the two categories share one flat reference
-namespace, so a name must be unique across them).
+the like), **`[tool.os.<name>]`** for OS-level dependencies (`docker`,
+`pkg-config`, …) that `rake` cannot `cargo install`, and **`[tool.fish.<name>]`**
+for fish shell function dependencies. A target references any kind by name from
+its `tools` list (the three categories share one flat reference namespace, so a
+name must be unique across all of them).
 
 Tools are ensured lazily: a tool's `check` only runs when a target that
 references it is actually run (never at parse time or for unrelated targets), and
@@ -255,6 +270,12 @@ support.
   message stating the requirement, plus any **`hint`** — `rake` does not try to
   install OS dependencies itself.
 
+**Fish tools** (`[tool.fish.<name>]`): the TOML key is the fish function name to
+check. No `check` or `install` fields are needed — `rake` always probes with
+`fish -c "functions --query <name>"`, covering user-defined, autoloaded, and
+builtin functions. When absent the run aborts with the requirement and any
+**`hint`**. Fish tools have no update support.
+
 ### Execution
 
 A target runs after its transitive dependencies. Within a target, commands run
@@ -274,6 +295,7 @@ the whole run regardless of how many roots reference them.
 ```bash
 cargo rake <target>              # run a target (and its dependencies)
 cargo rake all ^clean            # skip 'clean' (and any dep reachable only through it)
+cargo rake --dry-run <target>    # preview what would run without executing anything
 cargo rake list                  # list all targets and their commands
 cargo rake syntax                # parse + validate the Rakefile, reporting any errors
 cargo rake --file path/to/Rakefile.toml <target>

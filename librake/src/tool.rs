@@ -240,6 +240,31 @@ impl ToolTable {
     }
 }
 
+/// Check whether a newer version of `cargo-rake` is published on crates.io and
+/// install it via `cargo install cargo-rake` if one is found.
+///
+/// `current_version` is the running binary's semver string — pass
+/// `env!("CARGO_PKG_VERSION")` from the call site. Version-check and network
+/// failures are non-fatal (a `Warning` line is printed and the run continues),
+/// consistent with how cargo tool update failures are handled.
+///
+/// # Errors
+/// Returns [`Error::ToolInstallSpawn`] or [`Error::ToolInstallFailed`] if
+/// `cargo install cargo-rake` cannot be launched or exits non-zero.
+pub fn ensure_self_update(current_version: &str) -> Result<()> {
+    const NAME: &str = "cargo-rake";
+    eprint_tool("Checking", "check", NAME, &[], 0);
+    let tool = CargoTool {
+        crate_name: Some(NAME.to_string()),
+        check: vec![], // not read by update_if_newer
+        install: vec!["cargo".to_string(), "install".to_string(), NAME.to_string()],
+        update: true,
+        semver_check: SemverCheck::CratesIo,
+    };
+    let installed = parse_version_token(current_version);
+    update_if_newer(NAME, &tool, installed.as_ref(), 0)
+}
+
 /// Ensure a single cargo tool is available, installing or updating it as needed.
 ///
 /// Announces the check (a `Checking` line), then runs the tool's `check`
@@ -1002,6 +1027,14 @@ cmd = ["cargo", "matrix", "build"]
             }
             other => Err(format!("expected RequiredToolMissing, got {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn ensure_self_update_unparseable_version_is_nonfatal() -> TestResult {
+        // An unparseable version causes update_if_newer to print Warning + Ok(()).
+        // This path is entirely local — no registry lookup.
+        super::ensure_self_update("not-a-version")?;
+        Ok(())
     }
 
     #[test]

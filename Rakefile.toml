@@ -67,6 +67,10 @@
 # =============================================================================
 # toolchain = "stable"
 
+# ---------------------------------------------------------------------------
+# tools
+# ---------------------------------------------------------------------------
+
 [tool.cargo.matrix]
 crate = "cargo-matrix"
 check = ["cargo", "matrix", "--version"]
@@ -105,6 +109,10 @@ name = "puc"
 platform = ["linux"]
 fish = "puc"
 
+# ---------------------------------------------------------------------------
+# fmt
+# ---------------------------------------------------------------------------
+
 [[target.fmt.command]]
 name = "fmt"
 cmd = ["cargo", "fmt"]
@@ -113,6 +121,10 @@ cmd = ["cargo", "fmt"]
 name = "fmt check"
 cmd = ["cargo", "fmt", "--all", "--", "--check"]
 
+# ---------------------------------------------------------------------------
+# clippy
+# ---------------------------------------------------------------------------
+
 [target.clippy]
 tools = ["matrix"]
 
@@ -120,11 +132,19 @@ tools = ["matrix"]
 name = "clippy"
 cmd = ["cargo", "matrix", "clippy", "--all-targets", "--", "-Dwarnings"]
 
+# ---------------------------------------------------------------------------
+# build
+# ---------------------------------------------------------------------------
+
 [target.build]
 tools = ["matrix"]
 [[target.build.command]]
 name = "build"
 cmd = ["cargo", "matrix", "build"]
+
+# ---------------------------------------------------------------------------
+# test
+# ---------------------------------------------------------------------------
 
 [target.test]
 tools = ["matrix", "nextest"]
@@ -133,9 +153,17 @@ depends_on = ["build"]
 name = "test"
 cmd = ["cargo", "matrix", "nextest", "run"]
 
+# ---------------------------------------------------------------------------
+# docs
+# ---------------------------------------------------------------------------
+
 [[target.doc_test.command]]
 name = "doc test"
 cmd = ["cargo", "matrix", "test", "--doc", "-p", "librake"]
+
+# ---------------------------------------------------------------------------
+# coverage
+# ---------------------------------------------------------------------------
 
 [target.coverage]
 tools = ["llvm-cov", "matrix", "nextest"]
@@ -160,19 +188,19 @@ cmd = ["cargo", "llvm-cov", "report", "--lcov", "--output-path", "lcov.info"]
 name = "html"
 cmd = ["cargo", "llvm-cov", "report", "--html"]
 
+# ---------------------------------------------------------------------------
+# install
+# ---------------------------------------------------------------------------
+
 [target.install]
 depends_on = ["build"]
 [[target.install.command]]
 name = "install"
 cmd = ["cargo", "install", "--path", "cargo-rake", "--force", "--locked"]
 
-[[target.clean.command]]
-name = "clean"
-cmd = ["cargo", "clean"]
-
-[[target.clean.command]]
-name = "rm lcov.info"
-cmd = ["rm", "-f", "lcov.info"]
+# ---------------------------------------------------------------------------
+# musl
+# ---------------------------------------------------------------------------
 
 [target.musl]
 tools = ["docker"]
@@ -194,11 +222,27 @@ name = "perm"
 fish = "sudo chown -R $USER:$USER target/"
 sh = "sudo chown -R $USER:$USER target/"
 
+# ---------------------------------------------------------------------------
+# clean
+# ---------------------------------------------------------------------------
+
+[[target.clean.command]]
+name = "clean"
+cmd = ["cargo", "clean"]
+
+[[target.clean.command]]
+name = "rm lcov.info"
+cmd = ["rm", "-f", "lcov.info"]
+
+# ---------------------------------------------------------------------------
+# aggregates
+# ---------------------------------------------------------------------------
+
 [target.most]
 depends_on = ["fmt", "clippy", "build", "test", "coverage", "musl"]
 
 [target.daily]
-depends_on = ["puc", "all", "^install"]
+depends_on = ["all", "^install"]
 
 [target.all]
 depends_on = [

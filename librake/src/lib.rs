@@ -1,13 +1,17 @@
 //! Core library for `cargo-rake` / `rake`: a configuration-driven build tool.
 //!
-//! A `Rakefile.toml` declares named targets at the top level, each with an
-//! ordered array of named commands (every command has a `cmd` to run and an
-//! optional `skip_on_error` flag), an optional `depends_on` list, and an
-//! optional `tools` list naming entries in a top-level `[tool]` table (split
-//! into `[tool.cargo.<name>]` and `[tool.os.<name>]`, see [`ToolTable`]).
-//! Targets are parsed and validated by [`Rakefile`], and run in dependency
-//! order via [`Rakefile::run`]; a target's commands run in array order, after
-//! its referenced tools have been ensured (installed if missing).
+//! A `Rakefile.toml` declares named targets, each with an ordered array of
+//! named commands, an optional `depends_on` list, and an optional `tools` list.
+//! A command body is either a `cmd` (program + args, spawned directly) or one
+//! or more shell variants (`sh`/`fish`/`ps`); the current shell is
+//! auto-detected at run time. Prefix a `depends_on` entry with `^` to embed a
+//! skip for that dependency (equivalent to the CLI `^target` syntax). Tools
+//! live in a top-level `[tool]` table split into three categories:
+//! `[tool.cargo.<name>]`, `[tool.os.<name>]`, and `[tool.fish.<name>]` (see
+//! [`ToolTable`]). Targets are parsed and validated by [`Rakefile`] and run in
+//! dependency order via [`Rakefile::run`] (or previewed without execution via
+//! [`Rakefile::run_dry`]); commands run in array order after referenced tools
+//! have been ensured.
 
 //! librake
 
@@ -290,7 +294,7 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 }
 
 /// Render the targets of `rakefile` for display, in declaration order, showing
-/// each command (its `cmd` or its shell-resolved `sh`) and any `depends_on`.
+/// each command's body (cmd or shell variants) and any `depends_on`.
 ///
 /// # Examples
 ///

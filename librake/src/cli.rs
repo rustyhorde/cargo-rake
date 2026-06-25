@@ -19,6 +19,11 @@ pub struct Cli {
     /// Path to the Rakefile.
     #[arg(short, long, global = true, default_value = "Rakefile.toml")]
     pub file: PathBuf,
+    /// Print the targets and commands that would run without executing anything.
+    /// Tool checks and toolchain operations are also skipped. Configuration
+    /// errors (unknown targets, missing shell variants) are still reported.
+    #[arg(long, global = true)]
+    pub dry_run: bool,
     /// What to do (defaults to running the `default` target).
     #[command(subcommand)]
     pub action: Option<Action>,

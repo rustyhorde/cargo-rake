@@ -1,12 +1,13 @@
 //! External tool dependencies for targets.
 //!
-//! A `Rakefile.toml` may declare a top-level `[tool]` table split into two
+//! A `Rakefile.toml` may declare a top-level `[tool]` table split into three
 //! categories: **`[tool.cargo.<name>]`** for cargo-installable tools (cargo
-//! subcommands and the like) and **`[tool.os.<name>]`** for OS-level
-//! dependencies (`docker`, `pkg-config`, …) that `rake` cannot `cargo install`.
-//! Both are modelled by [`ToolTable`]; targets reference either kind by name via
-//! their `tools` list (the two categories share one flat reference namespace, so
-//! names must be unique across them).
+//! subcommands and the like), **`[tool.os.<name>]`** for OS-level dependencies
+//! (`docker`, `pkg-config`, …) that `rake` cannot `cargo install`, and
+//! **`[tool.fish.<name>]`** for fish shell functions that must exist before a
+//! target runs. All three are modelled by [`ToolTable`]; targets reference any
+//! kind by name via their `tools` list (the three categories share one flat
+//! reference namespace, so names must be unique across all of them).
 //!
 //! Before a target's commands run, each referenced tool is
 //! [`ensure`](ToolTable::ensure)d. A **cargo** tool's `check` command probes for
@@ -28,7 +29,7 @@ use serde::Deserialize;
 
 use crate::{
     error::{Error, Result},
-    rakefile::{Target, print_label},
+    rakefile::{GREEN, RESET, Target, color_stderr, print_label},
 };
 
 /// How a tool's `update = true` check resolves the latest available version.
@@ -44,12 +45,14 @@ pub enum SemverCheck {
     CratesIo,
 }
 
-/// The top-level `[tool]` table, split into the two tool categories.
+/// The top-level `[tool]` table, split into the three tool categories.
 ///
-/// `[tool.cargo.<name>]` entries deserialize into [`cargo`](ToolTable::cargo) and
-/// `[tool.os.<name>]` entries into [`os`](ToolTable::os). The two categories
-/// share one flat reference namespace (a target's `tools` names resolve against
-/// both), so a name must not appear in both — [`validate`] rejects that.
+/// `[tool.cargo.<name>]` entries deserialize into [`cargo`](ToolTable::cargo),
+/// `[tool.os.<name>]` entries into [`os`](ToolTable::os), and
+/// `[tool.fish.<name>]` entries into [`fish`](ToolTable::fish). All three
+/// categories share one flat reference namespace (a target's `tools` names
+/// resolve against all of them), so a name must not appear in more than one —
+/// [`validate`] rejects that.
 #[derive(Debug, Default, Deserialize)]
 pub struct ToolTable {
     /// Cargo-installable tools, declared under `[tool.cargo.<name>]`.
@@ -58,6 +61,26 @@ pub struct ToolTable {
     /// OS-level tool dependencies, declared under `[tool.os.<name>]`.
     #[serde(default)]
     pub os: IndexMap<String, OsTool>,
+    /// Fish shell function dependencies, declared under `[tool.fish.<name>]`.
+    /// The key is the fish function name to probe; no `check`/`install` fields
+    /// are needed because the name itself is the function to look up.
+    #[serde(default)]
+    pub fish: IndexMap<String, FishTool>,
+}
+
+/// A single fish shell function dependency declared in `[tool.fish.<name>]`.
+///
+/// The TOML key (`<name>`) is the fish function name to check. Unlike
+/// [`CargoTool`] and [`OsTool`], there is no `check` or `install` command —
+/// the presence check is always `fish -c "functions --query <name>"`, which
+/// covers user-defined functions, autoloaded functions, and builtins. When the
+/// function is absent the run aborts with the requirement and any `hint`.
+#[derive(Debug, Default, Deserialize)]
+pub struct FishTool {
+    /// An optional message describing how to define the function, shown when it
+    /// is absent (e.g. `"define my_fn in ~/.config/fish/functions/my_fn.fish"`).
+    #[serde(default)]
+    pub hint: Option<String>,
 }
 
 /// A single cargo-installable tool declared in `[tool.cargo.<name>]`.
@@ -111,9 +134,10 @@ pub struct OsTool {
 ///
 /// Each cargo tool's `check` and `install` must be non-empty, and one with
 /// `update = true` under the `crates-io` semver check must declare a `crate`.
-/// Each os tool's `check` must be non-empty. A tool name must not appear in both
-/// categories, and every `tools` entry on a target must name a tool in either
-/// category.
+/// Each os tool's `check` must be non-empty. Fish tools require no additional
+/// validation beyond name uniqueness. A tool name must not appear in more than
+/// one category, and every `tools` entry on a target must name a tool in one of
+/// the three categories.
 ///
 /// # Errors
 /// Returns [`Error::EmptyToolCommand`], [`Error::ToolUpdateMissingCrate`],
@@ -150,16 +174,25 @@ pub(crate) fn validate(tools: &ToolTable, targets: &IndexMap<String, Target>) ->
                 field: "check",
             });
         }
-        // The two categories share one flat reference namespace, so a name in
-        // both is ambiguous.
-        if tools.cargo.contains_key(name) {
+        // All three categories share one flat reference namespace.
+        if tools.cargo.contains_key(name) || tools.fish.contains_key(name) {
+            return Err(Error::DuplicateTool { tool: name.clone() });
+        }
+    }
+
+    for (name, _tool) in &tools.fish {
+        // Fish tools have no check/install to validate — just name uniqueness.
+        if tools.cargo.contains_key(name) || tools.os.contains_key(name) {
             return Err(Error::DuplicateTool { tool: name.clone() });
         }
     }
 
     for (name, target) in targets {
         for tool in &target.tools {
-            if !tools.cargo.contains_key(tool) && !tools.os.contains_key(tool) {
+            if !tools.cargo.contains_key(tool)
+                && !tools.os.contains_key(tool)
+                && !tools.fish.contains_key(tool)
+            {
                 return Err(Error::UnknownTool {
                     target: name.clone(),
                     tool: tool.clone(),
@@ -180,11 +213,27 @@ impl ToolTable {
     ///
     /// # Errors
     /// Propagates the install/requirement errors of the dispatched ensure.
-    pub(crate) fn ensure(&self, name: &str) -> Result<()> {
+    pub(crate) fn ensure(&self, name: &str, dry_run: bool, name_width: usize) -> Result<()> {
+        if dry_run {
+            // In dry-run mode, announce the dependency but skip the check and
+            // any install — no processes are spawned. Use the same tag as the
+            // live path so the output is consistent.
+            let tag = if self.fish.contains_key(name) {
+                "fish"
+            } else if self.cargo.contains_key(name) || self.os.contains_key(name) {
+                "check"
+            } else {
+                return Ok(());
+            };
+            eprint_tool("Checking", tag, name, &[], name_width);
+            return Ok(());
+        }
         if let Some(tool) = self.cargo.get(name) {
-            ensure_cargo(name, tool)
+            ensure_cargo(name, tool, name_width)
         } else if let Some(tool) = self.os.get(name) {
-            ensure_os(name, tool)
+            ensure_os(name, tool, name_width)
+        } else if let Some(tool) = self.fish.get(name) {
+            ensure_fish(name, tool, name_width)
         } else {
             Ok(())
         }
@@ -209,7 +258,7 @@ impl ToolTable {
 /// caught by [`validate`]), or [`Error::ToolInstallSpawn`] /
 /// [`Error::ToolInstallFailed`] if the install command cannot be launched or
 /// exits non-zero.
-fn ensure_cargo(name: &str, tool: &CargoTool) -> Result<()> {
+fn ensure_cargo(name: &str, tool: &CargoTool, name_width: usize) -> Result<()> {
     let Some((program, args)) = tool.check.split_first() else {
         return Err(Error::EmptyToolCommand {
             tool: name.to_string(),
@@ -217,12 +266,12 @@ fn ensure_cargo(name: &str, tool: &CargoTool) -> Result<()> {
         });
     };
 
-    eprint_tool("Checking", name, &[]);
+    eprint_tool("Checking", "check", name, &[], name_width);
     let output = ProcessCommand::new(program).args(args).output();
     let present = output.as_ref().is_ok_and(|o| o.status.success());
 
     if !present {
-        eprint_tool("Installing", name, &tool.install);
+        eprint_tool("Installing", "check", name, &tool.install, name_width);
         return run_install(name, &tool.install);
     }
 
@@ -231,12 +280,12 @@ fn ensure_cargo(name: &str, tool: &CargoTool) -> Result<()> {
         .and_then(|o| parse_installed_version(&o.stdout, &o.stderr));
 
     if tool.update {
-        update_if_newer(name, tool, installed.as_ref())?;
+        update_if_newer(name, tool, installed.as_ref(), name_width)?;
     } else {
         // Present and not an `update` tool: report what is already installed,
         // including the parsed version when the `check` output carried one.
         let detail = installed.map_or_else(Vec::new, |v| vec![v.to_string()]);
-        eprint_tool("Present", name, &detail);
+        eprint_tool("Present", "check", name, &detail, name_width);
     }
     Ok(())
 }
@@ -254,7 +303,7 @@ fn ensure_cargo(name: &str, tool: &CargoTool) -> Result<()> {
 /// [`validate`]), [`Error::RequiredToolMissing`] when the tool is absent and has
 /// no `install`, or [`Error::ToolInstallSpawn`] / [`Error::ToolInstallFailed`]
 /// if a declared install cannot be launched or exits non-zero.
-fn ensure_os(name: &str, tool: &OsTool) -> Result<()> {
+fn ensure_os(name: &str, tool: &OsTool, name_width: usize) -> Result<()> {
     let Some((program, args)) = tool.check.split_first() else {
         return Err(Error::EmptyToolCommand {
             tool: name.to_string(),
@@ -262,12 +311,12 @@ fn ensure_os(name: &str, tool: &OsTool) -> Result<()> {
         });
     };
 
-    eprint_tool("Checking", name, &[]);
+    eprint_tool("Checking", "check", name, &[], name_width);
     let output = ProcessCommand::new(program).args(args).output();
     let present = output.as_ref().is_ok_and(|o| o.status.success());
 
     if present {
-        eprint_tool("Present", name, &[]);
+        eprint_tool("Present", "check", name, &[], name_width);
         return Ok(());
     }
 
@@ -277,8 +326,34 @@ fn ensure_os(name: &str, tool: &OsTool) -> Result<()> {
             hint: tool.hint.clone(),
         });
     }
-    eprint_tool("Installing", name, &tool.install);
+    eprint_tool("Installing", "check", name, &tool.install, name_width);
     run_install(name, &tool.install)
+}
+
+/// Ensure a fish shell function is available.
+///
+/// Announces the check (a `Checking` line) and runs
+/// `fish -c "functions --query <name>"` to detect presence. When present,
+/// prints a `Present` line. When absent, aborts with
+/// [`Error::RequiredToolMissing`], stating the requirement and any `hint`.
+///
+/// The check covers user-defined functions, autoloaded functions, and builtins,
+/// matching what `fish -c "functions --query <name>"` reports.
+fn ensure_fish(name: &str, tool: &FishTool, name_width: usize) -> Result<()> {
+    eprint_tool("Checking", "fish", name, &[], name_width);
+    let present = ProcessCommand::new("fish")
+        .args(["-c", &format!("functions --query {name}")])
+        .status()
+        .is_ok_and(|s| s.success());
+    if present {
+        eprint_tool("Present", "fish", name, &[], name_width);
+        Ok(())
+    } else {
+        Err(Error::RequiredToolMissing {
+            tool: name.to_string(),
+            hint: tool.hint.clone(),
+        })
+    }
 }
 
 /// Parse the installed version from a `check` command's captured output. Both
@@ -291,15 +366,22 @@ fn parse_installed_version(stdout: &[u8], stderr: &[u8]) -> Option<Version> {
 
 /// When `update = true`, re-install the tool if [`latest_version`] reports a
 /// version newer than `installed`. Version-check failures are non-fatal.
-fn update_if_newer(name: &str, tool: &CargoTool, installed: Option<&Version>) -> Result<()> {
+fn update_if_newer(
+    name: &str,
+    tool: &CargoTool,
+    installed: Option<&Version>,
+    name_width: usize,
+) -> Result<()> {
     // Without a parseable installed version there is nothing to compare against,
     // and reinstalling on every run is worse than keeping the current one — so
     // skip the update (and the registry lookup) entirely.
     let Some(installed) = installed else {
         eprint_tool(
             "Warning",
+            "check",
             name,
             &["could not determine installed version; keeping current".to_string()],
+            name_width,
         );
         return Ok(());
     };
@@ -309,17 +391,31 @@ fn update_if_newer(name: &str, tool: &CargoTool, installed: Option<&Version>) ->
         Err(message) => {
             eprint_tool(
                 "Warning",
+                "check",
                 name,
                 &[format!("version check failed: {message}")],
+                name_width,
             );
             return Ok(());
         }
     };
     if latest > *installed {
-        eprint_tool("Updating", name, &[format!("{installed} -> {latest}")]);
+        eprint_tool(
+            "Updating",
+            "check",
+            name,
+            &[format!("{installed} -> {latest}")],
+            name_width,
+        );
         return run_install(name, &tool.install);
     }
-    eprint_tool("Up to date", name, &[installed.to_string()]);
+    eprint_tool(
+        "Up to date",
+        "check",
+        name,
+        &[installed.to_string()],
+        name_width,
+    );
     Ok(())
 }
 
@@ -424,14 +520,20 @@ fn parse_version_token(stdout: &str) -> Option<Version> {
 
 /// Print a tool status line via [`print_label`]: the `label` (e.g. `Checking`,
 /// `Installing`) as a right-justified bold-cyan prefix in the shared status
-/// column, followed by the tool `name` and any `detail`. With an empty `detail`
-/// only the name is shown, e.g. `Checking matrix`.
-fn eprint_tool(label: &str, name: &str, detail: &[String]) {
+/// column, followed by a green `[ <tag> ]` tag right-aligned to `name_width`
+/// (matching the command-name column), then the tool `name` and any `detail`.
+/// `tag` is `"check"` for cargo/os tools and `"fish"` for fish function tools.
+fn eprint_tool(label: &str, tag: &str, name: &str, detail: &[String], name_width: usize) {
+    let tag_str = if color_stderr() {
+        format!("{GREEN}[ {tag:>name_width$} ]{RESET}")
+    } else {
+        format!("[ {tag:>name_width$} ]")
+    };
     let detail = detail.join(" ");
     let info = if detail.is_empty() {
-        name.to_string()
+        format!("{tag_str} {name}")
     } else {
-        format!("{name} {detail}")
+        format!("{tag_str} {name} {detail}")
     };
     print_label(label, &info);
 }
@@ -608,21 +710,21 @@ cmd = ["cargo", "matrix", "build"]
     #[test]
     fn ensure_present_tool_skips_install() -> TestResult {
         // `check` succeeds, so `install` (which would fail) must not run.
-        ensure_cargo("present", &tool(&["true"], &["false"]))?;
+        ensure_cargo("present", &tool(&["true"], &["false"]), 0)?;
         Ok(())
     }
 
     #[test]
     fn ensure_absent_tool_installs() -> TestResult {
         // `check` fails (absent) so `install` runs and succeeds.
-        ensure_cargo("absent", &tool(&["false"], &["true"]))?;
+        ensure_cargo("absent", &tool(&["false"], &["true"]), 0)?;
         Ok(())
     }
 
     #[test]
     fn ensure_os_present_tool_is_ok() -> TestResult {
         // `check` succeeds, so a missing `install` is fine and no error fires.
-        ensure_os("present", &os_tool(&["true"], &[], None))?;
+        ensure_os("present", &os_tool(&["true"], &[], None), 0)?;
         Ok(())
     }
 
@@ -630,14 +732,18 @@ cmd = ["cargo", "matrix", "build"]
     fn ensure_os_absent_with_install_runs_it() -> TestResult {
         // Absent (`check` = `false`), but a declared `install` (`true`) runs and
         // succeeds.
-        ensure_os("absent", &os_tool(&["false"], &["true"], None))?;
+        ensure_os("absent", &os_tool(&["false"], &["true"], None), 0)?;
         Ok(())
     }
 
     #[test]
     fn ensure_os_absent_without_install_is_required_error() -> TestResult {
         // Absent and no `install`: abort with the requirement, carrying the hint.
-        match ensure_os("docker", &os_tool(&["false"], &[], Some("install Docker"))) {
+        match ensure_os(
+            "docker",
+            &os_tool(&["false"], &[], Some("install Docker")),
+            0,
+        ) {
             Err(Error::RequiredToolMissing { tool, hint }) => {
                 assert_eq!(tool, "docker");
                 assert_eq!(hint.as_deref(), Some("install Docker"));
@@ -650,7 +756,7 @@ cmd = ["cargo", "matrix", "build"]
     #[test]
     fn ensure_os_absent_install_failure_is_error() -> TestResult {
         // Absent with a declared `install` that fails (`false`) aborts the run.
-        match ensure_os("absent", &os_tool(&["false"], &["false"], None)) {
+        match ensure_os("absent", &os_tool(&["false"], &["false"], None), 0) {
             Err(Error::ToolInstallFailed { tool, status }) => {
                 assert_eq!(tool, "absent");
                 assert!(!status.success());
@@ -670,13 +776,13 @@ cmd = ["cargo", "matrix", "build"]
         let mut tool = tool(&["true"], &["false"]);
         tool.update = true;
         tool.crate_name = Some("anything".to_string());
-        ensure_cargo("present-no-version", &tool)?;
+        ensure_cargo("present-no-version", &tool, 0)?;
         Ok(())
     }
 
     #[test]
     fn ensure_install_failure_is_error() -> TestResult {
-        match ensure_cargo("absent", &tool(&["false"], &["false"])) {
+        match ensure_cargo("absent", &tool(&["false"], &["false"]), 0) {
             Err(Error::ToolInstallFailed { tool, status }) => {
                 assert_eq!(tool, "absent");
                 assert!(!status.success());
@@ -691,6 +797,7 @@ cmd = ["cargo", "matrix", "build"]
         match ensure_cargo(
             "absent",
             &tool(&["false"], &["this-program-does-not-exist-cargo-rake"]),
+            0,
         ) {
             Err(Error::ToolInstallSpawn { tool, program, .. }) => {
                 assert_eq!(tool, "absent");
@@ -796,6 +903,122 @@ cmd = ["cargo", "matrix", "build"]
                 Ok(())
             }
             other => Err(format!("expected DuplicateTool, got {other:?}").into()),
+        }
+    }
+
+    // --- fish tool tests ---
+
+    #[test]
+    fn parses_fish_tool_table() -> TestResult {
+        let toml = "[tool.fish.my_fn]\nhint = \"define my_fn in fish functions\"\n\
+                    [target.build]\ntools = [\"my_fn\"]\n\
+                    [[target.build.command]]\nname = \"b\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let entry = rakefile
+            .tools()
+            .fish
+            .get("my_fn")
+            .ok_or("expected a 'my_fn' fish tool")?;
+        assert_eq!(
+            entry.hint.as_deref(),
+            Some("define my_fn in fish functions")
+        );
+        let build = rakefile
+            .target("build")
+            .ok_or("expected a 'build' target")?;
+        assert_eq!(build.tools, vec!["my_fn".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_fish_tool_without_hint() -> TestResult {
+        let toml = "[tool.fish.cd]\n\
+                    [target.build]\ntools = [\"cd\"]\n\
+                    [[target.build.command]]\nname = \"b\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let entry = rakefile
+            .tools()
+            .fish
+            .get("cd")
+            .ok_or("expected a 'cd' fish tool")?;
+        assert!(entry.hint.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn fish_tool_name_in_cargo_and_fish_is_rejected() -> TestResult {
+        let toml = "[tool.cargo.x]\ncheck = [\"x\", \"-V\"]\ninstall = [\"cargo\", \"install\", \"x\"]\n\
+                    [tool.fish.x]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::DuplicateTool { tool }) => {
+                assert_eq!(tool, "x");
+                Ok(())
+            }
+            other => Err(format!("expected DuplicateTool, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn fish_tool_name_in_os_and_fish_is_rejected() -> TestResult {
+        let toml = "[tool.os.x]\ncheck = [\"x\", \"-V\"]\n\
+                    [tool.fish.x]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::DuplicateTool { tool }) => {
+                assert_eq!(tool, "x");
+                Ok(())
+            }
+            other => Err(format!("expected DuplicateTool, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn ensure_fish_present() -> TestResult {
+        // Skip when fish is not installed in the current environment.
+        if std::process::Command::new("fish")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+        {
+            return Ok(());
+        }
+        // `cd` is a fish builtin always available.
+        super::ensure_fish("cd", &super::FishTool { hint: None }, 0)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_fish_absent() -> TestResult {
+        match super::ensure_fish(
+            "__rake_test_nonexistent_fn_xyz",
+            &super::FishTool { hint: None },
+            0,
+        ) {
+            Err(Error::RequiredToolMissing { tool, hint }) => {
+                assert_eq!(tool, "__rake_test_nonexistent_fn_xyz");
+                assert!(hint.is_none());
+                Ok(())
+            }
+            other => Err(format!("expected RequiredToolMissing, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn ensure_fish_absent_with_hint() -> TestResult {
+        match super::ensure_fish(
+            "__rake_test_nonexistent_fn_xyz",
+            &super::FishTool {
+                hint: Some("add the function".to_string()),
+            },
+            0,
+        ) {
+            Err(Error::RequiredToolMissing { tool, hint }) => {
+                assert_eq!(tool, "__rake_test_nonexistent_fn_xyz");
+                assert_eq!(hint.as_deref(), Some("add the function"));
+                Ok(())
+            }
+            other => Err(format!("expected RequiredToolMissing, got {other:?}").into()),
         }
     }
 }

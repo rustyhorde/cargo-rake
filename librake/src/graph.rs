@@ -24,6 +24,20 @@ pub(crate) fn validate(targets: &IndexMap<String, Target>) -> Result<()> {
                 });
             }
         }
+        for skip in &target.skip_deps {
+            if !targets.contains_key(skip.as_str()) {
+                return Err(Error::UnknownDependency {
+                    target: name.clone(),
+                    dependency: skip.clone(),
+                });
+            }
+            if target.depends_on.contains(skip) {
+                return Err(Error::ConflictingDependency {
+                    target: name.clone(),
+                    name: skip.clone(),
+                });
+            }
+        }
     }
 
     let mut visited: HashSet<&str> = HashSet::new();
@@ -108,17 +122,20 @@ pub(crate) fn execution_order<'a>(
     Ok(build_order(targets, roots, &HashSet::new()))
 }
 
-/// The outcome of [`execution_order_with_skips`]: the kept targets to run, in
-/// order, plus the named skips that were actually part of the run graph (so the
-/// caller can announce only the skips that had an effect).
+/// A single step in an [`ExecutionPlan`]: either run a target or announce that
+/// it was skipped at the position it would have run.
+#[derive(Debug)]
+pub(crate) enum Step<'a> {
+    Run(&'a str),
+    Skip(&'a str),
+}
+
+/// The outcome of [`execution_order_with_skips`]: an interleaved sequence of
+/// run and skip steps in the natural execution order, so callers can announce
+/// each skip at the exact point where the target would have run.
 #[derive(Debug)]
 pub(crate) struct ExecutionPlan<'a> {
-    /// The targets to run, in execution order, with skipped targets (and any
-    /// dependency reachable only through one) pruned.
-    pub order: Vec<&'a str>,
-    /// The requested skips that were present in the un-skipped run graph, i.e.
-    /// the ones that actually pruned something.
-    pub skipped: Vec<&'a str>,
+    pub steps: Vec<Step<'a>>,
 }
 
 /// Like [`execution_order`] but prunes each target named in `skips` (and any
@@ -145,23 +162,35 @@ pub(crate) fn execution_order_with_skips<'a>(
         }
     }
 
-    // The full (un-skipped) reachable set tells us which requested skips are
-    // actually part of this run, so we announce only the ones that had an effect.
-    let full: HashSet<&str> = build_order(targets, roots, &HashSet::new())
-        .into_iter()
-        .collect();
-    let skipped: Vec<&'a str> = skips
-        .iter()
-        .filter_map(|s| targets.get_key_value(*s).map(|(k, _)| k.as_str()))
-        .filter(|s| full.contains(s))
-        .collect();
+    // The full (un-skipped) reachable set: used to find which skips had an
+    // effect and to collect embedded skip_deps from targets in the graph.
+    let full_order = build_order(targets, roots, &HashSet::new());
 
-    let skip_set: HashSet<&str> = skips.iter().copied().collect();
+    // Augment the CLI-provided skip set with embedded skip_deps declared in
+    // each target's depends_on (as ^-prefixed entries). Explicit roots are
+    // exempt: if the user named a target as a root, it wins over any embedded
+    // skip of the same name.
+    let root_set: HashSet<&str> = roots.iter().copied().collect();
+    let mut skip_set: HashSet<&str> = skips.iter().copied().collect();
+    let mut embedded: Vec<&'a str> = Vec::new();
+    for step in &full_order {
+        if let Some(target) = targets.get(*step) {
+            for dep_skip in &target.skip_deps {
+                if let Some((key, _)) = targets.get_key_value(dep_skip.as_str()) {
+                    let key: &'a str = key.as_str();
+                    if !root_set.contains(key) && skip_set.insert(key) {
+                        embedded.push(key);
+                    }
+                }
+            }
+        }
+    }
+
     let order = build_order(targets, roots, &skip_set);
 
-    // Eligibility: a skipped target may not be a dependency of any non-root
-    // target that still runs. Iterate skips in order for a deterministic message.
-    let root_set: HashSet<&str> = roots.iter().copied().collect();
+    // Eligibility: a CLI-requested skip may not be a dependency of any non-root
+    // target that still runs. Embedded skip_deps are intentional declarations
+    // in the Rakefile and are always honored without this check.
     for skip in skips {
         let dependents: Vec<&str> = order
             .iter()
@@ -181,7 +210,25 @@ pub(crate) fn execution_order_with_skips<'a>(
         }
     }
 
-    Ok(ExecutionPlan { order, skipped })
+    // Build interleaved steps from the full (un-skipped) order: targets in
+    // skip_set become Skip steps at the position they would have run; targets
+    // still in the kept order become Run steps; orphan dependencies pruned from
+    // both sets are omitted entirely (no announcement).
+    let order_set: HashSet<&str> = order.iter().copied().collect();
+    let steps = full_order
+        .into_iter()
+        .filter_map(|t| {
+            if skip_set.contains(t) {
+                Some(Step::Skip(t))
+            } else if order_set.contains(t) {
+                Some(Step::Run(t))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(ExecutionPlan { steps })
 }
 
 /// Build the concatenated per-root execution order, never visiting a target in
@@ -241,6 +288,29 @@ fn order_visit<'a>(
 }
 
 #[cfg(test)]
+impl<'a> ExecutionPlan<'a> {
+    fn order(&self) -> Vec<&'a str> {
+        self.steps
+            .iter()
+            .filter_map(|s| if let Step::Run(t) = s { Some(*t) } else { None })
+            .collect()
+    }
+
+    fn skipped(&self) -> Vec<&'a str> {
+        self.steps
+            .iter()
+            .filter_map(|s| {
+                if let Step::Skip(t) = s {
+                    Some(*t)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{execution_order, execution_order_with_skips, validate};
     use crate::{
@@ -252,6 +322,10 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     fn target(depends_on: &[&str]) -> Target {
+        target_full(depends_on, &[])
+    }
+
+    fn target_full(depends_on: &[&str], skip_deps: &[&str]) -> Target {
         Target {
             commands: vec![Command {
                 name: "run".to_string(),
@@ -264,6 +338,7 @@ mod tests {
                 arch: None,
             }],
             depends_on: depends_on.iter().map(|d| (*d).to_string()).collect(),
+            skip_deps: skip_deps.iter().map(|s| (*s).to_string()).collect(),
             tools: Vec::new(),
         }
     }
@@ -371,8 +446,8 @@ mod tests {
         let targets = graph(&[("a", &["b", "c"]), ("b", &[]), ("c", &[])]);
         validate(&targets)?;
         let plan = execution_order_with_skips(&targets, &["a"], &["c"])?;
-        assert_eq!(plan.order, vec!["b", "a"]);
-        assert_eq!(plan.skipped, vec!["c"]);
+        assert_eq!(plan.order(), vec!["b", "a"]);
+        assert_eq!(plan.skipped(), vec!["c"]);
         Ok(())
     }
 
@@ -388,9 +463,9 @@ mod tests {
         ]);
         validate(&targets)?;
         let plan = execution_order_with_skips(&targets, &["a"], &["clean"])?;
-        assert_eq!(plan.order, vec!["build", "a"]);
-        assert!(!plan.order.contains(&"wipe"));
-        assert_eq!(plan.skipped, vec!["clean"]);
+        assert_eq!(plan.order(), vec!["build", "a"]);
+        assert!(!plan.order().contains(&"wipe"));
+        assert_eq!(plan.skipped(), vec!["clean"]);
         Ok(())
     }
 
@@ -417,8 +492,10 @@ mod tests {
         let targets = graph(&[("x", &["shared"]), ("y", &["shared"]), ("shared", &[])]);
         validate(&targets)?;
         let plan = execution_order_with_skips(&targets, &["x", "y"], &["shared"])?;
-        assert_eq!(plan.order, vec!["x", "y"]);
-        assert_eq!(plan.skipped, vec!["shared"]);
+        assert_eq!(plan.order(), vec!["x", "y"]);
+        // Each root's graph runs independently, so the skip appears once per
+        // root at the position where shared would have run.
+        assert_eq!(plan.skipped(), vec!["shared", "shared"]);
         Ok(())
     }
 
@@ -440,8 +517,88 @@ mod tests {
         let targets = graph(&[("a", &[]), ("b", &[])]);
         validate(&targets)?;
         let plan = execution_order_with_skips(&targets, &["a"], &["b"])?;
-        assert_eq!(plan.order, vec!["a"]);
-        assert!(plan.skipped.is_empty());
+        assert_eq!(plan.order(), vec!["a"]);
+        assert!(plan.skipped().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn validate_rejects_unknown_skip_dep() -> TestResult {
+        let mut targets = graph(&[("a", &[])]);
+        targets.get_mut("a").unwrap().skip_deps = vec!["ghost".to_string()];
+        match validate(&targets) {
+            Err(Error::UnknownDependency { target, dependency }) => {
+                assert_eq!(target, "a");
+                assert_eq!(dependency, "ghost");
+                Ok(())
+            }
+            other => Err(format!("expected UnknownDependency, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_conflicting_dep_and_skip_dep() -> TestResult {
+        let mut targets = graph(&[("a", &["b"]), ("b", &[])]);
+        targets.get_mut("a").unwrap().skip_deps = vec!["b".to_string()];
+        match validate(&targets) {
+            Err(Error::ConflictingDependency { target, name }) => {
+                assert_eq!(target, "a");
+                assert_eq!(name, "b");
+                Ok(())
+            }
+            other => Err(format!("expected ConflictingDependency, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn embedded_skip_dep_prunes_from_execution() -> TestResult {
+        // `ci` depends on `all`, and declares `clean` as a skip_dep.
+        // `all` depends on `clean` and `build`. Running `rake ci` should prune
+        // `clean` from the run without the user passing `^clean` on the CLI.
+        let mut targets = IndexMap::new();
+        drop(targets.insert("build".to_string(), target(&[])));
+        drop(targets.insert("clean".to_string(), target(&[])));
+        drop(targets.insert("all".to_string(), target(&["build", "clean"])));
+        drop(targets.insert("ci".to_string(), target_full(&["all"], &["clean"])));
+        validate(&targets)?;
+        let plan = execution_order_with_skips(&targets, &["ci"], &[])?;
+        assert_eq!(plan.order(), vec!["build", "all", "ci"]);
+        assert!(!plan.order().contains(&"clean"));
+        assert_eq!(plan.skipped(), vec!["clean"]);
+        Ok(())
+    }
+
+    #[test]
+    fn embedded_skip_dep_in_transitive_dependency_applies() -> TestResult {
+        // `deploy` depends on `ci`, which declares `clean` as a skip_dep.
+        // Running `rake deploy` should still prune `clean`.
+        let mut targets = IndexMap::new();
+        drop(targets.insert("build".to_string(), target(&[])));
+        drop(targets.insert("clean".to_string(), target(&[])));
+        drop(targets.insert("all".to_string(), target(&["build", "clean"])));
+        drop(targets.insert("ci".to_string(), target_full(&["all"], &["clean"])));
+        drop(targets.insert("deploy".to_string(), target(&["ci"])));
+        validate(&targets)?;
+        let plan = execution_order_with_skips(&targets, &["deploy"], &[])?;
+        assert_eq!(plan.order(), vec!["build", "all", "ci", "deploy"]);
+        assert!(!plan.order().contains(&"clean"));
+        assert_eq!(plan.skipped(), vec!["clean"]);
+        Ok(())
+    }
+
+    #[test]
+    fn root_wins_over_embedded_skip_dep() -> TestResult {
+        // `ci` declares `clean` as a skip_dep, but the user explicitly names
+        // `clean` as a root. The root takes precedence — `clean` runs.
+        let mut targets = IndexMap::new();
+        drop(targets.insert("build".to_string(), target(&[])));
+        drop(targets.insert("clean".to_string(), target(&[])));
+        drop(targets.insert("all".to_string(), target(&["build", "clean"])));
+        drop(targets.insert("ci".to_string(), target_full(&["all"], &["clean"])));
+        validate(&targets)?;
+        let plan = execution_order_with_skips(&targets, &["ci", "clean"], &[])?;
+        // `clean` is a root, so it must appear in the order
+        assert!(plan.order().contains(&"clean"));
         Ok(())
     }
 }

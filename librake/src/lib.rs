@@ -267,7 +267,7 @@ pub use crate::{
         Command, Host, Rakefile, RunReport, ShellFamily, Target, detect_shell_family,
         format_duration, print_runtime, print_total_runtime,
     },
-    tool::{CargoTool, OsTool, SemverCheck, ToolTable},
+    tool::{CargoTool, FishTool, OsTool, SemverCheck, ToolTable},
     toolchain::ensure_rust_toolchain,
 };
 
@@ -315,8 +315,14 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
 
     for (name, target) in rakefile.targets() {
         let _ = writeln!(out, "{name}");
-        if !target.depends_on.is_empty() {
-            let _ = writeln!(out, "    depends_on: {}", target.depends_on.join(", "));
+        if !target.depends_on.is_empty() || !target.skip_deps.is_empty() {
+            let all: Vec<String> = target
+                .depends_on
+                .iter()
+                .cloned()
+                .chain(target.skip_deps.iter().map(|s| format!("^{s}")))
+                .collect();
+            let _ = writeln!(out, "    depends_on: {}", all.join(", "));
         }
         if !target.tools.is_empty() {
             let _ = writeln!(out, "    tools: {}", target.tools.join(", "));

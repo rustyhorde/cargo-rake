@@ -187,7 +187,7 @@ fn skips_target_with_caret_prefix() -> TestResult {
         .stdout(predicate::str::contains("BUILDING"))
         .stdout(predicate::str::contains("CLEANING").not())
         .stderr(predicate::str::contains(
-            "     Skipped [ rake ] [ clean ] skip requested",
+            "Skipped [ rake ] [   clean ] skip requested",
         ));
     Ok(())
 }
@@ -349,8 +349,11 @@ fn missing_tool_is_installed_before_target() -> TestResult {
         .success()
         .stdout(predicate::str::contains("built with widget"))
         // The install notice is printed to stderr: the right-justified
-        // "Installing" prefix followed by the "[ rake ]" tag and the tool name.
-        .stderr(predicate::str::contains("Installing [ rake ] widget"));
+        // "Installing" prefix followed by the "[ rake ]" tag, the "[ check ]"
+        // name tag, and the tool name.
+        .stderr(predicate::str::contains(
+            "Installing [ rake ] [ check ] widget",
+        ));
     Ok(())
 }
 

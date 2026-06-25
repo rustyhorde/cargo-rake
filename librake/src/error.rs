@@ -140,6 +140,17 @@ pub enum Error {
         /// The missing dependency name.
         dependency: String,
     },
+    /// A target's `depends_on` lists the same name both as a regular dependency
+    /// and as a skip entry (with a `^` prefix), which is contradictory.
+    #[error(
+        "target '{target}' lists '{name}' in depends_on both as a dependency and a skip (^{name}); remove one"
+    )]
+    ConflictingDependency {
+        /// The target with the conflicting `depends_on` entry.
+        target: String,
+        /// The name that appears as both a dep and a skip.
+        name: String,
+    },
     /// The dependency graph contains a cycle.
     #[error("circular dependency detected: {}", .cycle.join(" -> "))]
     CircularDependency {
@@ -233,10 +244,11 @@ pub enum Error {
         /// An optional, tool-supplied hint describing how to install it.
         hint: Option<String>,
     },
-    /// A tool name was declared in both the `[tool.cargo]` and `[tool.os]`
-    /// categories; tool reference names share one flat namespace.
+    /// A tool name was declared in more than one of the `[tool.cargo]`,
+    /// `[tool.os]`, or `[tool.fish]` categories; tool reference names share
+    /// one flat namespace.
     #[error(
-        "tool '{tool}' is declared in both [tool.cargo] and [tool.os] (tool names must be unique across categories)"
+        "tool '{tool}' is declared in more than one category (tool names must be unique across [tool.cargo], [tool.os], and [tool.fish])"
     )]
     DuplicateTool {
         /// The name declared in both categories.

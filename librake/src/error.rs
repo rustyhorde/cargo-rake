@@ -244,10 +244,11 @@ pub enum Error {
         /// An optional, tool-supplied hint describing how to install it.
         hint: Option<String>,
     },
-    /// A tool name was declared in both the `[tool.cargo]` and `[tool.os]`
-    /// categories; tool reference names share one flat namespace.
+    /// A tool name was declared in more than one of the `[tool.cargo]`,
+    /// `[tool.os]`, or `[tool.fish]` categories; tool reference names share
+    /// one flat namespace.
     #[error(
-        "tool '{tool}' is declared in both [tool.cargo] and [tool.os] (tool names must be unique across categories)"
+        "tool '{tool}' is declared in more than one category (tool names must be unique across [tool.cargo], [tool.os], and [tool.fish])"
     )]
     DuplicateTool {
         /// The name declared in both categories.

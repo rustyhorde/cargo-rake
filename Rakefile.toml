@@ -91,13 +91,18 @@ update = true
 check = ["docker", "--version"]
 hint = "install Docker: https://docs.docker.com/get-docker/"
 
+[tool.fish.puc]
+hint = "The 'puc' fish function is required to run this target"
+
 # ---------------------------------------------------------------------------
 # update
 # ---------------------------------------------------------------------------
 
+[target.puc]
+tools = ["puc"]
 [[target.puc.command]]
 name = "puc"
-os = ["linux"]
+platform = ["linux"]
 fish = "puc"
 
 [[target.fmt.command]]
@@ -196,7 +201,17 @@ depends_on = ["fmt", "clippy", "build", "test", "coverage", "musl"]
 depends_on = ["puc", "all", "^install"]
 
 [target.all]
-depends_on = ["puc", "fmt", "clippy", "build", "test", "coverage", "install", "musl", "clean"]
+depends_on = [
+    "puc",
+    "fmt",
+    "clippy",
+    "build",
+    "test",
+    "coverage",
+    "install",
+    "musl",
+    "clean",
+]
 
 [target.default]
 depends_on = ["most"]

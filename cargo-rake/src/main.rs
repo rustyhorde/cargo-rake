@@ -324,6 +324,9 @@ fn run(cli: &Cli) -> Result<()> {
         // Respect an explicitly-declared toolchain (verify/install the channel and
         // pin to it); a Rakefile without the key is a quiet no-op.
         librake::ensure_rust_toolchain(rakefile.toolchain())?;
+        if rakefile.update() {
+            librake::ensure_self_update(env!("CARGO_PKG_VERSION"))?;
+        }
     }
     // `run`/`run_dry` prints the total `Runtime` line itself (on success and on
     // an aborting error alike), so the error still propagates after that line.

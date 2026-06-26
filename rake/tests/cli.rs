@@ -17,7 +17,10 @@ type TestResult = Result<(), Box<dyn Error>>;
 
 /// A Rakefile exercising plain targets, a `depends_on` chain, a failing target,
 /// and a `skip_on_error` dependency feeding a dependent.
+#[cfg(not(windows))]
 const SAMPLE: &str = r#"
+update = false
+
 [[target.hello.command]]
 name = "say"
 cmd = ["echo", "Hello from rake!"]
@@ -44,6 +47,36 @@ name = "say"
 cmd = ["echo", "ran after skip"]
 "#;
 
+#[cfg(windows)]
+const SAMPLE: &str = r#"
+update = false
+
+[[target.hello.command]]
+name = "say"
+cmd = ["cmd", "/c", "echo", "Hello from rake!"]
+
+[target.default]
+depends_on = ["hello"]
+[[target.default.command]]
+name = "say"
+cmd = ["cmd", "/c", "echo", "Running default target"]
+
+[[target.boom.command]]
+name = "fail"
+cmd = ["cmd", "/c", "exit", "3"]
+
+[[target.skip.command]]
+name = "flaky"
+cmd = ["cmd", "/c", "exit", "1"]
+skip_on_error = true
+
+[target.after_skip]
+depends_on = ["skip"]
+[[target.after_skip.command]]
+name = "say"
+cmd = ["cmd", "/c", "echo", "ran after skip"]
+"#;
+
 /// Write `contents` to a `Rakefile.toml` in a fresh temp dir, returning the dir
 /// (kept alive so it isn't deleted) for the caller to derive the path from.
 fn rakefile_dir(contents: &str) -> Result<TempDir, Box<dyn Error>> {
@@ -67,11 +100,17 @@ fn list_prints_targets() -> TestResult {
         .assert()
         .success()
         .stdout(predicate::str::contains("hello"))
-        .stdout(predicate::str::contains("say: echo Hello from rake!"))
+        .stdout(predicate::str::contains(if cfg!(windows) {
+            "say: cmd /c echo Hello from rake!"
+        } else {
+            "say: echo Hello from rake!"
+        }))
         .stdout(predicate::str::contains("depends_on: hello"))
-        .stdout(predicate::str::contains(
-            "flaky: sh -c exit 1 (skip_on_error)",
-        ));
+        .stdout(predicate::str::contains(if cfg!(windows) {
+            "flaky: cmd /c exit 1 (skip_on_error)"
+        } else {
+            "flaky: sh -c exit 1 (skip_on_error)"
+        }));
     Ok(())
 }
 
@@ -139,9 +178,11 @@ fn runs_named_target() -> TestResult {
         // assert_cmd stderr is not a TTY, so they appear uncolored. Commands use
         // a fixed "Running" prefix (5 leading spaces in the 12-char column)
         // followed by the "[ rake ]" tag and `[ name ] program args`.
-        .stderr(predicate::str::contains(
-            "     Running [ rake ] [ say ] echo Hello from rake!",
-        ))
+        .stderr(predicate::str::contains(if cfg!(windows) {
+            "     Running [ rake ] [ say ] cmd /c echo Hello from rake!"
+        } else {
+            "     Running [ rake ] [ say ] echo Hello from rake!"
+        }))
         // Labels share that column: per-command "Cmd Runtime" gets 1 leading
         // space, the final "Runtime" gets 5.
         .stderr(predicate::str::contains(" Cmd Runtime "))
@@ -168,11 +209,21 @@ fn runs_multiple_named_targets() -> TestResult {
 fn skips_target_with_caret_prefix() -> TestResult {
     // `all` depends on `clean` and `build`; nothing else needs `clean`, so
     // `^clean` prunes it. `clean`'s output is absent and a `Skipped` line shows.
-    let dir = rakefile_dir(
-        "[[target.clean.command]]\nname = \"wipe\"\ncmd = [\"echo\", \"CLEANING\"]\n\
-         [[target.build.command]]\nname = \"compile\"\ncmd = [\"echo\", \"BUILDING\"]\n\
-         [target.all]\ndepends_on = [\"clean\", \"build\"]\n",
-    )?;
+    let (clean_cmd, build_cmd) = if cfg!(windows) {
+        (
+            r#"["cmd", "/c", "echo", "CLEANING"]"#,
+            r#"["cmd", "/c", "echo", "BUILDING"]"#,
+        )
+    } else {
+        (r#"["echo", "CLEANING"]"#, r#"["echo", "BUILDING"]"#)
+    };
+    let toml = format!(
+        "update = false\n\
+         [[target.clean.command]]\nname = \"wipe\"\ncmd = {clean_cmd}\n\
+         [[target.build.command]]\nname = \"compile\"\ncmd = {build_cmd}\n\
+         [target.all]\ndepends_on = [\"clean\", \"build\"]\n"
+    );
+    let dir = rakefile_dir(&toml)?;
     rake(&dir)?
         .arg("all")
         .arg("^clean")
@@ -189,9 +240,11 @@ fn skips_target_with_caret_prefix() -> TestResult {
 #[test]
 fn skip_required_by_other_target_fails_fast() -> TestResult {
     // `build` (not a root) depends on `clean`, so `^clean` is rejected before
-    // anything runs.
+    // anything runs (no commands execute, so the echo programs never need to
+    // exist on the host).
     let dir = rakefile_dir(
-        "[[target.clean.command]]\nname = \"wipe\"\ncmd = [\"echo\", \"CLEANING\"]\n\
+        "update = false\n\
+         [[target.clean.command]]\nname = \"wipe\"\ncmd = [\"echo\", \"CLEANING\"]\n\
          [target.build]\ndepends_on = [\"clean\"]\n\
          [[target.build.command]]\nname = \"compile\"\ncmd = [\"echo\", \"BUILDING\"]\n\
          [target.all]\ndepends_on = [\"build\"]\n",
@@ -266,7 +319,8 @@ fn failing_target_propagates_exit_code() -> TestResult {
 /// command's `Cmd Runtime` and the total `Runtime` before the error message.
 #[test]
 fn spawn_failure_still_prints_runtimes() -> TestResult {
-    let toml = "[[target.ghost.command]]\nname = \"missing\"\n\
+    let toml = "update = false\n\
+                [[target.ghost.command]]\nname = \"missing\"\n\
                 cmd = [\"this-program-does-not-exist-cargo-rake\"]\n";
     let dir = rakefile_dir(toml)?;
     rake(&dir)?
@@ -296,7 +350,10 @@ fn skip_on_error_continues_chain() -> TestResult {
 
 /// A target defined purely by `depends_on` (no commands of its own) is valid: it
 /// runs its dependencies in order and exits 0.
+#[cfg(not(windows))]
 const AGGREGATOR: &str = r#"
+update = false
+
 [[target.one.command]]
 name = "say"
 cmd = ["echo", "ran one"]
@@ -304,6 +361,22 @@ cmd = ["echo", "ran one"]
 [[target.two.command]]
 name = "say"
 cmd = ["echo", "ran two"]
+
+[target.all]
+depends_on = ["one", "two"]
+"#;
+
+#[cfg(windows)]
+const AGGREGATOR: &str = r#"
+update = false
+
+[[target.one.command]]
+name = "say"
+cmd = ["cmd", "/c", "echo", "ran one"]
+
+[[target.two.command]]
+name = "say"
+cmd = ["cmd", "/c", "echo", "ran two"]
 
 [target.all]
 depends_on = ["one", "two"]
@@ -321,9 +394,13 @@ fn depends_only_target_runs_dependencies() -> TestResult {
     Ok(())
 }
 
-/// A target whose tool is reported absent (`check` is `false`) and whose
-/// `install` is a portable no-op (`true`), so the run installs then proceeds.
+/// A target whose tool is reported absent (`check` is `false`/`cmd /c exit 1`)
+/// and whose `install` is a portable no-op (`true`/`cmd /c exit 0`), so the
+/// run installs then proceeds.
+#[cfg(not(windows))]
 const NEEDS_TOOL: &str = r#"
+update = false
+
 [tool.cargo.widget]
 check = ["false"]
 install = ["true"]
@@ -333,6 +410,21 @@ tools = ["widget"]
 [[target.build.command]]
 name = "say"
 cmd = ["echo", "built with widget"]
+"#;
+
+#[cfg(windows)]
+const NEEDS_TOOL: &str = r#"
+update = false
+
+[tool.cargo.widget]
+check = ["cmd", "/c", "exit", "1"]
+install = ["cmd", "/c", "exit", "0"]
+
+[target.build]
+tools = ["widget"]
+[[target.build.command]]
+name = "say"
+cmd = ["cmd", "/c", "echo", "built with widget"]
 "#;
 
 #[test]

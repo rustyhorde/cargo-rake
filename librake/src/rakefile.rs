@@ -293,17 +293,22 @@ fn classify_shell(name: &str) -> ShellFamily {
 
 /// Resolve the [`ShellFamily`] from the relevant environment signals, in
 /// priority order (first match wins): a PowerShell env channel (any OS), then
-/// `PSModulePath` on non-Windows (pwsh on Linux/macOS), then `$SHELL`'s basename,
-/// then the platform default (`Ps` on Windows, else `Posix`). PowerShell is
-/// checked first because it does not set `$SHELL`.
+/// `PSModulePath` on non-Windows (pwsh on Linux/macOS), then `FISH_VERSION`
+/// (exported by fish to all child processes), then `$SHELL`'s basename, then
+/// the platform default (`Ps` on Windows, else `Posix`). PowerShell is checked
+/// first because it does not set `$SHELL`; `FISH_VERSION` is checked before
+/// `$SHELL` because `$SHELL` reflects the login shell, not the running shell.
 fn shell_family_from_env(
-    ps_channel: bool,
-    ps_module_nonwindows: bool,
+    has_ps_signal: bool,
+    fish_version: bool,
     shell: Option<&str>,
     is_windows: bool,
 ) -> ShellFamily {
-    if ps_channel || ps_module_nonwindows {
+    if has_ps_signal {
         return ShellFamily::Ps;
+    }
+    if fish_version {
+        return ShellFamily::Fish;
     }
     match shell.filter(|s| !s.is_empty()) {
         Some(shell) => {
@@ -317,6 +322,9 @@ fn shell_family_from_env(
 
 /// Detect the current shell family from the process environment.
 ///
+/// The `RAKE_SHELL` environment variable overrides automatic detection; set it
+/// to any shell name (`fish`, `sh`, `bash`, `pwsh`, etc.) to pin the family.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -328,12 +336,18 @@ fn shell_family_from_env(
 /// ```
 #[must_use]
 pub fn detect_shell_family() -> ShellFamily {
-    let ps_channel = std::env::var_os("POWERSHELL_DISTRIBUTION_CHANNEL").is_some();
-    let ps_module_nonwindows = !cfg!(windows) && std::env::var_os("PSModulePath").is_some();
+    if let Some(val) = std::env::var_os("RAKE_SHELL")
+        && let Some(s) = val.to_str().filter(|s| !s.is_empty())
+    {
+        return classify_shell(s);
+    }
+    let has_ps_signal = std::env::var_os("POWERSHELL_DISTRIBUTION_CHANNEL").is_some()
+        || (!cfg!(windows) && std::env::var_os("PSModulePath").is_some());
+    let fish_version = std::env::var_os("FISH_VERSION").is_some();
     let shell = std::env::var_os("SHELL");
     shell_family_from_env(
-        ps_channel,
-        ps_module_nonwindows,
+        has_ps_signal,
+        fish_version,
         shell.as_deref().and_then(|s| s.to_str()),
         cfg!(windows),
     )
@@ -517,7 +531,7 @@ impl Rakefile {
     /// cmd  = ["cargo", "build"]
     /// "#;
     ///
-    /// let rakefile = Rakefile::from_toml_str(&toml)?;
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
     /// assert!(rakefile.target("build").is_some());
     /// # Ok::<(), librake::Error>(())
     /// ```
@@ -547,7 +561,7 @@ impl Rakefile {
     /// cmd   = ["cargo", "build"]
     /// tools = ["pkg-config"]
     /// "#;
-    /// let rakefile = Rakefile::from_toml_str(&toml)?;
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
     /// assert_eq!(
     ///     rakefile.target("build")
     ///         .and_then(|t| t.commands.first())
@@ -674,7 +688,7 @@ impl Rakefile {
     ///     "[[target.build.command]]\nname=\"c\"\ncmd=[\"cargo\",\"build\"]\n",
     ///     "[[target.test.command]]\nname=\"t\"\ncmd=[\"cargo\",\"test\"]",
     /// );
-    /// let rakefile = Rakefile::from_toml_str(&toml)?;
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
     /// let names: Vec<&str> = rakefile.targets().keys().map(String::as_str).collect();
     /// assert_eq!(names, ["build", "test"]);
     /// # Ok::<(), librake::Error>(())
@@ -776,7 +790,7 @@ impl Rakefile {
     ///
     /// # fn main() -> librake::Result<()> {
     /// let toml = "[[target.build.command]]\nname=\"compile\"\ncmd=[\"cargo\",\"build\"]";
-    /// let rakefile = Rakefile::from_toml_str(&toml)?;
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
     /// let report = rakefile.run(&["build"])?;
     /// println!("status: {:?}", report.status);
     /// # Ok(())
@@ -816,7 +830,7 @@ impl Rakefile {
     ///
     /// # fn main() -> librake::Result<()> {
     /// let toml = "[[target.build.command]]\nname=\"compile\"\ncmd=[\"cargo\",\"build\"]";
-    /// let rakefile = Rakefile::from_toml_str(&toml)?;
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
     /// let report = rakefile.run_with_family(&["build"], ShellFamily::Posix)?;
     /// println!("status: {:?}", report.status);
     /// # Ok(())
@@ -850,7 +864,7 @@ impl Rakefile {
     ///
     /// # fn main() -> librake::Result<()> {
     /// let toml = "[[target.build.command]]\nname=\"compile\"\ncmd=[\"cargo\",\"build\"]";
-    /// let rakefile = Rakefile::from_toml_str(&toml)?;
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
     /// let report = rakefile.run_with(&["build"], ShellFamily::Posix, Host::detect())?;
     /// println!("status: {:?}", report.status);
     /// # Ok(())
@@ -873,7 +887,7 @@ impl Rakefile {
     ///
     /// # fn main() -> librake::Result<()> {
     /// let toml = "[[target.build.command]]\nname=\"compile\"\ncmd=[\"cargo\",\"build\"]";
-    /// let rakefile = Rakefile::from_toml_str(&toml)?;
+    /// let rakefile = Rakefile::from_toml_str(toml)?;
     /// let report = rakefile.run_dry_with(&["build"], ShellFamily::Posix, Host::detect())?;
     /// assert!(report.status.is_none());
     /// # Ok(())
@@ -1732,7 +1746,7 @@ cmd = ["cargo", "doc"]
     fn depends_only_target_is_accepted() -> TestResult {
         let toml = "[[target.build.command]]\nname = \"compile\"\ncmd = [\"true\"]\n\
                     [target.all]\ndepends_on = [\"build\"]\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let all = rakefile.target("all").ok_or("expected an 'all' target")?;
         assert!(all.commands.is_empty());
         assert_eq!(all.depends_on, vec!["build".to_string()]);
@@ -1817,7 +1831,7 @@ cmd = ["cargo", "doc"]
     fn run_missing_program_is_spawn_error() -> TestResult {
         let toml = "[[target.go.command]]\nname = \"ghost\"\n\
                     cmd = [\"this-program-does-not-exist-cargo-rake\", \"--version\"]\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         match rakefile.run(&["go"]) {
             Err(Error::Spawn {
                 target,
@@ -1837,7 +1851,7 @@ cmd = ["cargo", "doc"]
     #[test]
     fn run_portable_command_succeeds() -> TestResult {
         let toml = "[[target.version.command]]\nname = \"ver\"\ncmd = [\"cargo\", \"--version\"]\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let status = rakefile
             .run(&["version"])?
             .status
@@ -1849,7 +1863,7 @@ cmd = ["cargo", "doc"]
     #[test]
     fn skip_on_error_defaults_to_false() -> TestResult {
         let toml = "[[target.build.command]]\nname = \"compile\"\ncmd = [\"cargo\", \"build\"]\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let build = rakefile
             .target("build")
             .ok_or("expected a 'build' target")?;
@@ -1860,8 +1874,10 @@ cmd = ["cargo", "doc"]
 
     #[test]
     fn commands_run_in_array_order_stop_at_failure() -> TestResult {
-        let toml = format!("[[target.demo.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
-                    [[target.demo.command]]\nname = \"after\"\n{CMD_EXIT0}\n");
+        let toml = format!(
+            "[[target.demo.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
+                    [[target.demo.command]]\nname = \"after\"\n{CMD_EXIT0}\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         // The first command fails without `skip_on_error`, so execution stops
         // there and `after` never runs: the returned status is the failure.
@@ -1872,8 +1888,10 @@ cmd = ["cargo", "doc"]
 
     #[test]
     fn skip_on_error_continues_remaining_commands() -> TestResult {
-        let toml = format!("[[target.demo.command]]\nname = \"boom\"\n{CMD_EXIT1}\nskip_on_error = true\n\
-                    [[target.demo.command]]\nname = \"after\"\n{CMD_EXIT0}\n");
+        let toml = format!(
+            "[[target.demo.command]]\nname = \"boom\"\n{CMD_EXIT1}\nskip_on_error = true\n\
+                    [[target.demo.command]]\nname = \"after\"\n{CMD_EXIT0}\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         // `boom` fails but opts into skipping, so `after` still runs and its
         // success is the status returned.
@@ -1884,9 +1902,11 @@ cmd = ["cargo", "doc"]
 
     #[test]
     fn skip_on_error_continues_chain() -> TestResult {
-        let toml = format!("[[target.flaky.command]]\nname = \"boom\"\n{CMD_EXIT1}\nskip_on_error = true\n\
+        let toml = format!(
+            "[[target.flaky.command]]\nname = \"boom\"\n{CMD_EXIT1}\nskip_on_error = true\n\
                     [target.all]\ndepends_on = [\"flaky\"]\n\
-                    [[target.all.command]]\nname = \"ok\"\n{CMD_EXIT0}\n");
+                    [[target.all.command]]\nname = \"ok\"\n{CMD_EXIT0}\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         // `flaky` exits non-zero but opts into skipping, so `all` still runs and
         // its success is the status returned for the whole chain.
@@ -1897,9 +1917,11 @@ cmd = ["cargo", "doc"]
 
     #[test]
     fn failing_dependency_without_skip_aborts() -> TestResult {
-        let toml = format!("[[target.flaky.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
+        let toml = format!(
+            "[[target.flaky.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
                     [target.all]\ndepends_on = [\"flaky\"]\n\
-                    [[target.all.command]]\nname = \"ok\"\n{CMD_EXIT0}\n");
+                    [[target.all.command]]\nname = \"ok\"\n{CMD_EXIT0}\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         // `flaky` fails and does not skip, so the chain stops there: `all` never
         // runs and the returned status reflects the failure.
@@ -1910,9 +1932,11 @@ cmd = ["cargo", "doc"]
 
     #[test]
     fn depends_only_target_runs_dependencies() -> TestResult {
-        let toml = format!("[[target.build.command]]\nname = \"compile\"\n{CMD_EXIT0}\n\
+        let toml = format!(
+            "[[target.build.command]]\nname = \"compile\"\n{CMD_EXIT0}\n\
                     [[target.test.command]]\nname = \"check\"\n{CMD_EXIT0}\n\
-                    [target.all]\ndepends_on = [\"build\", \"test\"]\n");
+                    [target.all]\ndepends_on = [\"build\", \"test\"]\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         // `all` has no command of its own; its status is that of the last
         // dependency to run.
@@ -1924,8 +1948,10 @@ cmd = ["cargo", "doc"]
     #[test]
     fn multiple_root_targets_run_in_one_call() -> TestResult {
         // Two independent roots given together both run; the run succeeds.
-        let toml = format!("[[target.one.command]]\nname = \"a\"\n{CMD_EXIT0}\n\
-                    [[target.two.command]]\nname = \"b\"\n{CMD_EXIT0}\n");
+        let toml = format!(
+            "[[target.one.command]]\nname = \"a\"\n{CMD_EXIT0}\n\
+                    [[target.two.command]]\nname = \"b\"\n{CMD_EXIT0}\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["one", "two"])?
@@ -1939,11 +1965,13 @@ cmd = ["cargo", "doc"]
     fn shared_dependency_of_two_roots_stops_run_once() -> TestResult {
         // Both roots depend on `flaky`, which fails without `skip_on_error`.
         // The shared dep runs once and aborts the whole merged chain.
-        let toml = format!("[[target.flaky.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
+        let toml = format!(
+            "[[target.flaky.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
                     [target.one]\ndepends_on = [\"flaky\"]\n\
                     [[target.one.command]]\nname = \"a\"\n{CMD_EXIT0}\n\
                     [target.two]\ndepends_on = [\"flaky\"]\n\
-                    [[target.two.command]]\nname = \"b\"\n{CMD_EXIT0}\n");
+                    [[target.two.command]]\nname = \"b\"\n{CMD_EXIT0}\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["one", "two"])?
@@ -1957,9 +1985,11 @@ cmd = ["cargo", "doc"]
     fn run_with_present_tool_succeeds() -> TestResult {
         // The tool's `check` (`true`) reports it present, so `install` (`false`,
         // which would fail) never runs and the target's command still runs.
-        let toml = format!("[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
                     [target.build]\ntools = [\"t\"]\n\
-                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\n");
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["build"])?
@@ -1973,9 +2003,11 @@ cmd = ["cargo", "doc"]
     fn run_with_failing_tool_install_aborts() -> TestResult {
         // The tool is absent (`check` fails) and its `install` fails, so the
         // run errors before the target's command runs.
-        let toml = format!("[tool.cargo.t]\ncheck = {TOML_EXIT1}\ninstall = {TOML_EXIT1}\n\
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT1}\ninstall = {TOML_EXIT1}\n\
                     [target.build]\ntools = [\"t\"]\n\
-                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\n");
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         match rakefile.run(&["build"]) {
             Err(Error::ToolInstallFailed { tool, .. }) => {
@@ -1991,11 +2023,13 @@ cmd = ["cargo", "doc"]
         // Both `build` and its dependency `dep` reference the same present tool;
         // ensuring is deduped, so the run completes (and `install`, `false`,
         // never runs even though two targets reference the tool).
-        let toml = format!("[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
                     [target.dep]\ntools = [\"t\"]\n\
                     [[target.dep.command]]\nname = \"c\"\n{CMD_EXIT0}\n\
                     [target.build]\ntools = [\"t\"]\ndepends_on = [\"dep\"]\n\
-                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\n");
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["build"])?
@@ -2009,8 +2043,10 @@ cmd = ["cargo", "doc"]
     fn command_tool_is_ensured_when_command_runs() -> TestResult {
         // The command-level tool's `check` (`true`) reports it present, so
         // `install` (`false`, which would fail) never runs.
-        let toml = format!("[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
-                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\ntools = [\"t\"]\n");
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\ntools = [\"t\"]\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["build"])?
@@ -2033,7 +2069,7 @@ cmd = ["cargo", "doc"]
         if cfg!(windows) {
             return Ok(());
         }
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let status = rakefile
             .run(&["build"])?
             .status
@@ -2047,9 +2083,11 @@ cmd = ["cargo", "doc"]
         // Two commands in the same target both reference the same present tool;
         // the dedup set ensures it is checked at most once (`install = ["false"]`
         // must not fire).
-        let toml = format!("[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
                     [[target.build.command]]\nname = \"a\"\n{CMD_EXIT0}\ntools = [\"t\"]\n\
-                    [[target.build.command]]\nname = \"b\"\n{CMD_EXIT0}\ntools = [\"t\"]\n");
+                    [[target.build.command]]\nname = \"b\"\n{CMD_EXIT0}\ntools = [\"t\"]\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["build"])?
@@ -2074,17 +2112,27 @@ cmd = ["cargo", "doc"]
     #[test]
     fn shell_family_from_env_precedence() {
         use super::{ShellFamily, shell_family_from_env};
-        // A PowerShell env channel wins over `$SHELL` (PowerShell never sets it).
+        // A PowerShell env signal wins over everything (PowerShell never sets $SHELL).
         assert_eq!(
             shell_family_from_env(true, false, Some("/usr/bin/fish"), false),
             ShellFamily::Ps
         );
-        // `PSModulePath` selects PowerShell only on non-Windows.
+        // PS wins even when FISH_VERSION is also set.
         assert_eq!(
-            shell_family_from_env(false, true, Some("/bin/bash"), false),
+            shell_family_from_env(true, true, Some("/bin/bash"), false),
             ShellFamily::Ps
         );
-        // Otherwise `$SHELL`'s basename classifies the family.
+        // FISH_VERSION wins over $SHELL — the Omarchy scenario: login=bash, running=fish.
+        assert_eq!(
+            shell_family_from_env(false, true, Some("/usr/bin/bash"), false),
+            ShellFamily::Fish
+        );
+        // FISH_VERSION wins even when $SHELL is unset.
+        assert_eq!(
+            shell_family_from_env(false, true, None, false),
+            ShellFamily::Fish
+        );
+        // Without FISH_VERSION, $SHELL basename classifies the family.
         assert_eq!(
             shell_family_from_env(false, false, Some("/usr/bin/fish"), false),
             ShellFamily::Fish
@@ -2093,7 +2141,7 @@ cmd = ["cargo", "doc"]
             shell_family_from_env(false, false, Some("/bin/zsh"), false),
             ShellFamily::Posix
         );
-        // Unset `$SHELL` falls back to the platform default.
+        // Unset $SHELL falls back to the platform default.
         assert_eq!(
             shell_family_from_env(false, false, None, true),
             ShellFamily::Ps
@@ -2102,7 +2150,7 @@ cmd = ["cargo", "doc"]
             shell_family_from_env(false, false, None, false),
             ShellFamily::Posix
         );
-        // An empty `$SHELL` is treated as unset.
+        // An empty $SHELL is treated as unset.
         assert_eq!(
             shell_family_from_env(false, false, Some(""), false),
             ShellFamily::Posix
@@ -2157,7 +2205,7 @@ cmd = ["cargo", "doc"]
     fn coexisting_shell_variants_are_accepted() -> TestResult {
         let toml = "[[target.build.command]]\nname = \"c\"\n\
                     sh = \"true\"\nfish = \"true\"\nps = \"$true\"\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let build = rakefile.target("build").ok_or("expected 'build'")?;
         let command = build.commands.first().ok_or("expected a command")?;
         // All three variants render in `list` output.
@@ -2171,7 +2219,7 @@ cmd = ["cargo", "doc"]
         // The command defines only a `fish` variant, but a POSIX shell is
         // selected, so there is no `sh` variant to run.
         let toml = "[[target.go.command]]\nname = \"only fish\"\nfish = \"echo hi\"\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         match rakefile.run_with_family(&["go"], ShellFamily::Posix) {
             Err(Error::MissingShellVariant {
                 target,
@@ -2197,7 +2245,7 @@ cmd = ["cargo", "doc"]
         // exits 0 when the substitution worked.
         let toml =
             "[[target.go.command]]\nname = \"expand\"\nsh = \"test \\\"$(echo ok)\\\" = ok\"\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let status = rakefile
             .run_with_family(&["go"], ShellFamily::Posix)?
             .status
@@ -2213,7 +2261,7 @@ cmd = ["cargo", "doc"]
             return Ok(());
         }
         let toml = "[[target.go.command]]\nname = \"boom\"\nsh = \"exit 3\"\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let status = rakefile
             .run_with_family(&["go"], ShellFamily::Posix)?
             .status
@@ -2229,7 +2277,7 @@ cmd = ["cargo", "doc"]
         let toml = "[tool.os.docker]\ncheck = [\"false\"]\nhint = \"install Docker\"\n\
                     [target.build]\ntools = [\"docker\"]\n\
                     [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         match rakefile.run(&["build"]) {
             Err(Error::RequiredToolMissing { tool, hint }) => {
                 assert_eq!(tool, "docker");
@@ -2306,7 +2354,7 @@ cmd = ["cargo", "doc"]
         // A command that would fail if spawned — in dry-run mode the spawn is
         // skipped entirely, so the report carries no status (treated as success).
         let toml = "[[target.go.command]]\nname = \"boom\"\ncmd = [\"false\"]\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let host = Host {
             os: "linux",
             family: "unix",
@@ -2325,7 +2373,7 @@ cmd = ["cargo", "doc"]
         let toml = "[[target.build.command]]\nname = \"b\"\ncmd = [\"false\"]\n\
                     [target.all]\ndepends_on = [\"build\"]\n\
                     [[target.all.command]]\nname = \"a\"\ncmd = [\"false\"]\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let host = Host {
             os: "linux",
             family: "unix",
@@ -2342,7 +2390,7 @@ cmd = ["cargo", "doc"]
         // Even in dry-run, a command with no variant for the detected shell is a
         // configuration error — the Rakefile is invalid regardless of execution.
         let toml = "[[target.go.command]]\nname = \"fish only\"\nfish = \"echo hi\"\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let host = Host {
             os: "linux",
             family: "unix",
@@ -2368,8 +2416,10 @@ cmd = ["cargo", "doc"]
         use super::{Host, ShellFamily};
         // The first command is gated to windows (skipped on this linux host); the
         // second still runs, so the run reports its success.
-        let toml = format!("[[target.go.command]]\nname = \"win only\"\nplatform = [\"windows\"]\n{CMD_EXIT1}\n\
-                    [[target.go.command]]\nname = \"always\"\n{CMD_EXIT0}\n");
+        let toml = format!(
+            "[[target.go.command]]\nname = \"win only\"\nplatform = [\"windows\"]\n{CMD_EXIT1}\n\
+                    [[target.go.command]]\nname = \"always\"\n{CMD_EXIT0}\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         let host = Host {
             os: "linux",
@@ -2389,9 +2439,11 @@ cmd = ["cargo", "doc"]
         use super::{Host, ShellFamily};
         // `clean` would fail if it ran; skipping it via `^clean` lets `all`
         // (which still runs `build`) succeed.
-        let toml = format!("[[target.clean.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
+        let toml = format!(
+            "[[target.clean.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
                     [[target.build.command]]\nname = \"ok\"\n{CMD_EXIT0}\n\
-                    [target.all]\ndepends_on = [\"clean\", \"build\"]\n");
+                    [target.all]\ndepends_on = [\"clean\", \"build\"]\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         let host = Host {
             os: "linux",
@@ -2414,7 +2466,7 @@ cmd = ["cargo", "doc"]
                     [target.build]\ndepends_on = [\"clean\"]\n\
                     [[target.build.command]]\nname = \"b\"\ncmd = [\"true\"]\n\
                     [target.all]\ndepends_on = [\"build\"]\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let host = Host {
             os: "linux",
             family: "unix",
@@ -2439,7 +2491,7 @@ cmd = ["cargo", "doc"]
         // Gated to the host's platform, so it runs and its non-zero exit shows.
         let toml =
             "[[target.go.command]]\nname = \"boom\"\nplatform = [\"linux\"]\nsh = \"exit 3\"\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let host = Host {
             os: "linux",
             family: "unix",
@@ -2498,7 +2550,7 @@ cmd = ["cargo", "doc"]
                     [[target.clean.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
                     [target.ci]\ndepends_on = [\"build\", \"^clean\"]\n\
                     [[target.ci.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let ci = rakefile.target("ci").ok_or("expected 'ci'")?;
         assert_eq!(ci.depends_on, vec!["build".to_string()]);
         assert_eq!(ci.skip_deps, vec!["clean".to_string()]);
@@ -2510,12 +2562,14 @@ cmd = ["cargo", "doc"]
         use super::{Host, ShellFamily};
         // `clean` would fail if it ran; `ci`'s depends_on `^clean` prunes it
         // automatically without a CLI `^clean` token.
-        let toml = format!("[[target.clean.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
+        let toml = format!(
+            "[[target.clean.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
              [[target.build.command]]\nname = \"ok\"\n{CMD_EXIT0}\n\
              [target.all]\ndepends_on = [\"clean\", \"build\"]\n\
              [[target.all.command]]\nname = \"c\"\n{CMD_EXIT0}\n\
              [target.ci]\ndepends_on = [\"all\", \"^clean\"]\n\
-             [[target.ci.command]]\nname = \"c\"\n{CMD_EXIT0}\n");
+             [[target.ci.command]]\nname = \"c\"\n{CMD_EXIT0}\n"
+        );
         let rakefile = Rakefile::from_toml_str(&toml)?;
         let host = Host {
             os: "linux",
@@ -2565,7 +2619,7 @@ cmd = ["cargo", "doc"]
         let toml = "[[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
                     [target.ci]\ndepends_on = [\"build\", \"^\"]\n\
                     [[target.ci.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let rakefile = Rakefile::from_toml_str(toml)?;
         let ci = rakefile.target("ci").ok_or("expected 'ci'")?;
         assert_eq!(ci.depends_on, vec!["build".to_string()]);
         assert!(ci.skip_deps.is_empty());

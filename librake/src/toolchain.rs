@@ -361,7 +361,9 @@ mod tests {
     #[test]
     fn finish_install_maps_exit_status() -> TestResult {
         let ok = if cfg!(windows) {
-            ProcessCommand::new("cmd").args(["/c", "exit", "0"]).status()?
+            ProcessCommand::new("cmd")
+                .args(["/c", "exit", "0"])
+                .status()?
         } else {
             ProcessCommand::new("true").status()?
         };
@@ -371,16 +373,16 @@ mod tests {
         }
 
         let bad = if cfg!(windows) {
-            ProcessCommand::new("cmd").args(["/c", "exit", "1"]).status()?
+            ProcessCommand::new("cmd")
+                .args(["/c", "exit", "1"])
+                .status()?
         } else {
             ProcessCommand::new("false").status()?
         };
         match finish_install(bad) {
             Err(Error::RustInstallFailed { .. }) => {}
             other => {
-                return Err(
-                    format!("expected RustInstallFailed for exit-1, got {other:?}").into(),
-                );
+                return Err(format!("expected RustInstallFailed for exit-1, got {other:?}").into());
             }
         }
         Ok(())

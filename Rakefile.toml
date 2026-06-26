@@ -273,6 +273,9 @@ cmd = ["rm", "-f", "lcov.info"]
 [target.most]
 depends_on = ["fmt", "clippy", "build", "test", "coverage", "musl"]
 
+[target.daily.windows]
+depends_on = ["all", "^musl"]
+
 [target.daily]
 depends_on = ["all", "^install"]
 

@@ -4,7 +4,7 @@ resolver = "3"
 members = ["librake", "cargo-rake", "rake", "xtask"]
 
 [workspace.dependencies]
-anyhow = "1.0.102"
+anyhow = "1.0.103"
 assert_cmd = "2.2.2"
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4.6.5"
@@ -15,15 +15,15 @@ predicates = "3.1.4"
 rustversion = "1.0.22"
 semver = "1.0.28"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+serde_json = "1.0.150"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 toml = { version = "1.1.2", features = ["preserve_order"] }
 ureq = { version = "3.3.0", features = ["json"] }
-vergen-gix = { version = "10.0.0", features = [
+vergen-gix = { version = "10.0.1", features = [
     "build",
     "cargo",
     "rustc",
     "si",
 ] }
-vergen-pretty = { version = "10.0.0", features = ["color"] }
+vergen-pretty = { version = "10.0.1", features = ["color"] }

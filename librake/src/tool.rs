@@ -277,21 +277,83 @@ impl ToolTable {
 /// failures are non-fatal (a `Warning` line is printed and the run continues),
 /// consistent with how cargo tool update failures are handled.
 ///
+/// Returns `true` when a new version was installed, `false` when already up to
+/// date (or when the version check could not be performed). The caller should
+/// re-exec the updated binary when this returns `true`.
+///
 /// # Errors
-/// Returns [`Error::ToolInstallSpawn`] or [`Error::ToolInstallFailed`] if
-/// `cargo install cargo-rake` cannot be launched or exits non-zero.
-pub fn ensure_self_update(current_version: &str) -> Result<()> {
+/// Returns [`Error::SelfUpdatePrepare`] if the running binary cannot be renamed
+/// on Windows before installation, or [`Error::ToolInstallSpawn`] /
+/// [`Error::ToolInstallFailed`] if `cargo install cargo-rake` cannot be
+/// launched or exits non-zero.
+pub fn ensure_self_update(current_version: &str) -> Result<bool> {
     const NAME: &str = "cargo-rake";
     eprint_tool("Checking", "check", NAME, &[], 0);
-    let tool = CargoTool {
-        crate_name: Some(NAME.to_string()),
-        check: vec![], // not read by update_if_newer
-        install: vec!["cargo".to_string(), "install".to_string(), NAME.to_string()],
-        update: true,
-        semver_check: SemverCheck::CratesIo,
+
+    let Some(installed) = parse_version_token(current_version) else {
+        eprint_tool(
+            "Warning",
+            "check",
+            NAME,
+            &["could not determine installed version; keeping current".to_string()],
+            0,
+        );
+        return Ok(false);
     };
-    let installed = parse_version_token(current_version);
-    update_if_newer(NAME, &tool, installed.as_ref(), 0)
+
+    let latest = match latest_crate_version(NAME) {
+        Ok(Some(v)) => v,
+        Ok(None) => return Ok(false),
+        Err(message) => {
+            eprint_tool(
+                "Warning",
+                "check",
+                NAME,
+                &[format!("version check failed: {message}")],
+                0,
+            );
+            return Ok(false);
+        }
+    };
+
+    if latest <= installed {
+        eprint_tool("Up to date", "check", NAME, &[installed.to_string()], 0);
+        return Ok(false);
+    }
+
+    eprint_tool(
+        "Updating",
+        "check",
+        NAME,
+        &[format!("{installed} -> {latest}")],
+        0,
+    );
+
+    // Windows: the OS locks running executables, so `cargo install` cannot
+    // overwrite the current binary in place. Rename it away first; the
+    // running process continues from the old (now renamed) file, and after
+    // install the original path holds the new binary.
+    #[cfg(windows)]
+    rename_for_self_update()?;
+
+    let install = vec!["cargo".to_string(), "install".to_string(), NAME.to_string()];
+    run_install(NAME, &install)?;
+    Ok(true)
+}
+
+/// Rename the running executable to `<exe>.bak` so `cargo install` can place
+/// the updated binary at the original path without a sharing-violation error.
+#[cfg(windows)]
+fn rename_for_self_update() -> Result<()> {
+    use std::path::PathBuf;
+    let exe = std::env::current_exe().map_err(Error::SelfUpdatePrepare)?;
+    let bak: PathBuf = {
+        let mut s = exe.clone().into_os_string();
+        s.push(".bak");
+        s.into()
+    };
+    std::fs::rename(&exe, &bak).map_err(Error::SelfUpdatePrepare)?;
+    Ok(())
 }
 
 /// Ensure a single cargo tool is available, installing or updating it as needed.
@@ -1098,9 +1160,10 @@ cmd = ["cargo", "matrix", "build"]
 
     #[test]
     fn ensure_self_update_unparseable_version_is_nonfatal() -> TestResult {
-        // An unparseable version causes update_if_newer to print Warning + Ok(()).
-        // This path is entirely local — no registry lookup.
-        super::ensure_self_update("not-a-version")?;
+        // An unparseable version prints a Warning and returns Ok(false) with no
+        // registry lookup or install attempt.
+        let updated = super::ensure_self_update("not-a-version")?;
+        assert!(!updated, "unparseable version should not trigger an update");
         Ok(())
     }
 

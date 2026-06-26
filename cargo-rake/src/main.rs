@@ -277,7 +277,38 @@ static LONG_VERSION: LazyLock<String> = LazyLock::new(|| {
     output
 });
 
+/// Delete any `<exe>.bak` left behind by a previous self-update cycle on
+/// Windows. Errors are silently ignored — the file may not exist, or may still
+/// be held open by a previous process that is still exiting.
+#[cfg(windows)]
+fn cleanup_stale_update_backup() {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut bak = exe.into_os_string();
+        bak.push(".bak");
+        let _ = std::fs::remove_file(std::path::PathBuf::from(bak));
+    }
+}
+
+/// Spawn the updated binary (at the path `current_exe()` now resolves to after
+/// `cargo install`) with the original arguments, wait for it to finish, and
+/// exit with its status code. Called after a successful self-update so the
+/// newly installed version handles the actual work.
+fn relaunch() -> Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("failed to locate updated binary: {e}"))?;
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let status = std::process::Command::new(&exe)
+        .args(&args)
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to relaunch updated binary: {e}"))?;
+    exit(exit_code(status));
+}
+
 fn main() -> Result<()> {
+    // Remove any stale .bak file left by the previous self-update cycle.
+    #[cfg(windows)]
+    cleanup_stale_update_backup();
+
     // Cargo invokes this as `cargo rake ...`, passing argv `[cargo-rake, rake, ...]`.
     // Drop the leading `rake` so the remaining args parse like the `rake` binary.
     let mut args: Vec<OsString> = std::env::args_os().collect();
@@ -324,8 +355,8 @@ fn run(cli: &Cli) -> Result<()> {
         // Respect an explicitly-declared toolchain (verify/install the channel and
         // pin to it); a Rakefile without the key is a quiet no-op.
         librake::ensure_rust_toolchain(rakefile.toolchain())?;
-        if rakefile.update() {
-            librake::ensure_self_update(env!("CARGO_PKG_VERSION"))?;
+        if rakefile.update() && librake::ensure_self_update(env!("CARGO_PKG_VERSION"))? {
+            relaunch()?;
         }
     }
     // `run`/`run_dry` prints the total `Runtime` line itself (on success and on

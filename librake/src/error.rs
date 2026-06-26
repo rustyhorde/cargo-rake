@@ -314,6 +314,13 @@ pub enum Error {
         /// The name declared in both categories.
         tool: String,
     },
+    /// The running binary could not be renamed before a self-update install.
+    ///
+    /// On Windows, `cargo install` cannot overwrite a running executable, so the
+    /// binary is renamed to `<exe>.bak` first. This error fires when that rename
+    /// fails.
+    #[error("failed to prepare binary for self-update: {0}")]
+    SelfUpdatePrepare(io::Error),
     /// A Rust toolchain (cargo) is required to run targets but none is available
     /// — it was not found and installation was declined, impossible (no
     /// interactive terminal), or did not make cargo available.

@@ -285,7 +285,7 @@ fn cleanup_stale_update_backup() {
     if let Ok(exe) = std::env::current_exe() {
         let mut bak = exe.into_os_string();
         bak.push(".bak");
-        let _ = std::fs::remove_file(std::path::PathBuf::from(bak));
+        drop(std::fs::remove_file(std::path::PathBuf::from(bak)));
     }
 }
 

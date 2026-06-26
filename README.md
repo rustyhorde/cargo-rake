@@ -199,19 +199,22 @@ tools = ["puc"]
 name = "puc"
 fish = "puc"
 
-# Whole target scoped to macOS — silently pruned before graph building on every
-# other host. Commands inside a platform-scoped target must not re-declare
-# platform; that is a syntax error.
-[target.notarize]
-platform = ["macos"]
+# macOS-specific variant — active only on macOS.  A base [target.notarize]
+# is defined below as a cross-platform no-op so that `all` can depend on it
+# without TargetNotAvailableOnPlatform on other hosts.
+[target.notarize.macos]
 
-[[target.notarize.command]]
+[[target.notarize.macos.command]]
 name = "submit"
 cmd  = ["xcrun", "notarytool", "submit", "dist.pkg"]
 
+[target.notarize]            # base: no-op on non-macOS hosts
+[[target.notarize.command]]
+name = "skip"
+sh   = "true"
+ps   = "exit 0"
+
 [target.all]
-# `notarize` is platform = ["macos"]; it is auto-pruned on other hosts with no
-# extra configuration needed — just list it as a normal dependency.
 depends_on = ["build", "test", "check", "package", "notarize"]
 
 [target.default]
@@ -252,30 +255,32 @@ depends_on = ["test"]
   `[[target.<t>.command]]` (ensured immediately before that specific command,
   and only when it is not platform/arch-skipped). A name declared at both
   levels for the same target is a parse-time error. See [Tools](#tools).
-- **`platform`** (target-level, optional list) — the same OS/family tokens as
-  command-level `platform` (`linux`/`macos`/`unix`/…). When set on
-  `[target.<name>]`, the whole target and any dependency reachable *only*
-  through it are silently pruned from the run on non-matching hosts, before
-  the dependency graph is built. Commands inside a platform-scoped target must
-  not also declare `platform` — that is a parse-time error. See the `notarize`
-  target above for a usage example.
-- **`platform`** (optional list, on a target or a command) names OS or family
-  tokens (`linux`/`macos`/`windows`/`unix`/…). **`arch`** (optional list, per
-  command only) names architecture tokens (`x86_64`/`aarch64`/…). Both lists are
-  validated at parse time; an empty list or an unknown token is a hard error.
-  The two levels behave differently:
-  - **Target-level `platform`** (set on `[target.<name>]`) scopes the whole
-    target: it and any dependency reachable *only* through it are **silently
-    pruned before the dependency graph is built** on non-matching hosts — no
-    `Skipped` line is printed. This lets a cross-platform `all` target list
-    platform-specific sub-targets as normal dependencies without `if`-chains.
-    Commands inside a platform-scoped target must **not** declare their own
-    `platform` — that is a parse-time error.
-  - **Command-level `platform`** (set on `[[target.<t>.command]]`) gates a
-    single command at run time: a non-matching command is **silently skipped**
-    — a `Skipped` status line is printed and the target's remaining commands
-    continue. A command runs only when every declared dimension matches (AND
-    across `platform`/`arch`, OR within each list).
+- **Platform-specific targets** — add a platform token as a sub-table key to
+  declare a platform-specific variant of a target (e.g. `[target.sign.macos]`,
+  `[target.sign.linux]`). The most specific match wins: an OS token (e.g.
+  `linux`) beats a family token (e.g. `unix`) when both variants exist for the
+  current host. If no variant matches and no base `[target.sign]` exists, any
+  target that `depends_on` it fails with `TargetNotAvailableOnPlatform` — add a
+  base variant as a cross-platform fallback (or no-op) when needed. The
+  `notarize` target above shows this pattern.
+
+  Valid **OS tokens** (match `std::env::consts::OS`):
+  `linux`, `macos`, `windows`, `freebsd`, `netbsd`, `openbsd`, `dragonfly`,
+  `solaris`, `illumos`, `android`, `ios`, `tvos`, `watchos`, `visionos`,
+  `fuchsia`, `redox`, `haiku`, `hurd`, `aix`, `nto`, `emscripten`, `wasi`
+
+  Valid **family tokens** (match `std::env::consts::FAMILY`): `unix`, `windows`, `wasm`
+
+  An unknown token, or any key other than `depends_on`/`tools`/`command` and the
+  platform tokens above, is a hard parse-time error.
+- **`platform`** (optional list, per command) names OS or family tokens
+  (`linux`/`macos`/`windows`/`unix`/…). **`arch`** (optional list, per command
+  only) names architecture tokens (`x86_64`/`aarch64`/…). Both lists are
+  validated at parse time; an empty list or an unknown token is a hard error. A
+  command runs only when every declared dimension matches (AND across
+  `platform`/`arch`, OR within each list). A non-matching command is **silently
+  skipped** — a `Skipped` status line is printed and the target's remaining
+  commands continue.
 - **Skipping targets**: prefix a target name with `^` to exclude it from the run
   (e.g. `rake all ^clean`). The skipped target and any dependency reachable only
   through it are pruned. A skip is not allowed if another non-root target that

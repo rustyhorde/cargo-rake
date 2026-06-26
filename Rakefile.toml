@@ -111,27 +111,33 @@ hint = "The 'puc' fish function is required to run this target"
 # update
 # ---------------------------------------------------------------------------
 
-[target.puc]
+[target.puc.linux]
 tools = ["puc"]
-platform = ["linux"]
 
-[[target.puc.command]]
+[[target.puc.linux.command]]
 name = "puc"
 fish = "puc"
 
+[[target.puc.command]]
+name = "pull"
+cmd = ["git", "pull"]
+
+[[target.puc.command]]
+name = "puc clean"
+cmd = ["cargo", "clean"]
+
 # ---------------------------------------------------------------------------
-# platform-scoped target example
+# platform-specific target example
 #
-# This target is declared for linux only. On macOS or Windows the whole target
-# (and any dep reachable only through it) is silently pruned before the graph
-# is built — no Skipped line, just a narrower graph. Commands in a
-# platform-scoped target must not re-declare platform; that is a syntax error.
+# [target.linux-only.linux] declares a linux-only variant with no base target.
+# On macOS or Windows the target is simply absent from the resolved map.  Any
+# other target that depends_on it would get TargetNotAvailableOnPlatform on a
+# non-linux host — add a base [target.linux-only] if cross-platform use is needed.
 # ---------------------------------------------------------------------------
 
-[target.linux-only]
-platform = ["linux"]
+[target.linux-only.linux]
 
-[[target.linux-only.command]]
+[[target.linux-only.linux.command]]
 name = "uname"
 cmd  = ["uname", "-r"]
 

@@ -13,11 +13,23 @@ use crate::{
 ///
 /// Every `depends_on` entry must name an existing target
 /// ([`Error::UnknownDependency`]) and the graph must be acyclic
-/// ([`Error::CircularDependency`]).
-pub(crate) fn validate(targets: &IndexMap<String, Target>) -> Result<()> {
+/// ([`Error::CircularDependency`]). Dependencies present in `excluded`
+/// (targets that exist only as platform-specific variants not matching the
+/// current host) are silently accepted here — they are automatically pruned
+/// during execution by [`build_order`] (which simply does not visit missing
+/// targets). [`Error::TargetNotAvailableOnPlatform`] is only raised when a
+/// user *explicitly requests* an excluded target as a root (see
+/// [`execution_order_with_skips`]).
+pub(crate) fn validate(
+    targets: &IndexMap<String, Target>,
+    excluded: &IndexMap<String, Vec<String>>,
+) -> Result<()> {
     for (name, target) in targets {
         for dependency in &target.depends_on {
             if !targets.contains_key(dependency) {
+                if excluded.contains_key(dependency.as_str()) {
+                    continue;
+                }
                 return Err(Error::UnknownDependency {
                     target: name.clone(),
                     dependency: dependency.clone(),
@@ -26,6 +38,9 @@ pub(crate) fn validate(targets: &IndexMap<String, Target>) -> Result<()> {
         }
         for skip in &target.skip_deps {
             if !targets.contains_key(skip.as_str()) {
+                if excluded.contains_key(skip.as_str()) {
+                    continue;
+                }
                 return Err(Error::UnknownDependency {
                     target: name.clone(),
                     dependency: skip.clone(),
@@ -148,21 +163,24 @@ pub(crate) struct ExecutionPlan<'a> {
 /// than silently running that target without its prerequisite.
 ///
 /// Every `root` and every `skip` must name an existing target, else
-/// [`Error::UnknownTarget`]; both are checked before any ordering happens.
-///
-/// `auto_skips` names targets that are silently pruned before graph building
-/// (e.g. targets whose `platform` does not match the current host). Unlike
-/// CLI-requested `skips`, auto-skipped targets: vanish without a `Skipped`
-/// announcement, are never checked for eligibility (`SkipNotAllowed`), and
-/// their dependents simply run without them rather than erroring.
+/// [`Error::UnknownTarget`]; both are checked before any ordering happens. If a
+/// name is absent from `targets` but present in `excluded` (platform-specific
+/// variants that don't match the current host), [`Error::TargetNotAvailableOnPlatform`]
+/// is returned instead.
 pub(crate) fn execution_order_with_skips<'a>(
     targets: &'a IndexMap<String, Target>,
+    excluded: &IndexMap<String, Vec<String>>,
     roots: &[&str],
     skips: &[&str],
-    auto_skips: &HashSet<&str>,
 ) -> Result<ExecutionPlan<'a>> {
     for name in roots.iter().chain(skips) {
         if !targets.contains_key(*name) {
+            if let Some(available_on) = excluded.get(*name) {
+                return Err(Error::TargetNotAvailableOnPlatform {
+                    name: (*name).to_string(),
+                    available_on: available_on.clone(),
+                });
+            }
             return Err(Error::UnknownTarget {
                 name: (*name).to_string(),
             });
@@ -192,18 +210,11 @@ pub(crate) fn execution_order_with_skips<'a>(
         }
     }
 
-    // Combined skip set for graph building: both CLI/embedded skips and
-    // platform auto-skips are pruned from the kept order.
-    let combined_skip_set: HashSet<&str> = cli_skip_set
-        .iter()
-        .copied()
-        .chain(auto_skips.iter().copied())
-        .collect();
-    let order = build_order(targets, roots, &combined_skip_set);
+    let order = build_order(targets, roots, &cli_skip_set);
 
     // Eligibility: a CLI-requested skip may not be a dependency of any non-root
-    // target that still runs. Embedded skip_deps and auto-skips are intentional
-    // and are always honored without this check.
+    // target that still runs. Embedded skip_deps are intentional and are always
+    // honored without this check.
     for skip in skips {
         let dependents: Vec<&str> = order
             .iter()
@@ -224,7 +235,6 @@ pub(crate) fn execution_order_with_skips<'a>(
     }
 
     // Build interleaved steps from the full (un-skipped) order:
-    // - auto-skipped targets vanish silently (no announcement)
     // - CLI/embedded skip targets become Skip steps at their natural position
     // - targets still in the kept order become Run steps
     // - orphan dependencies (reachable only through a skipped target) are omitted
@@ -232,9 +242,7 @@ pub(crate) fn execution_order_with_skips<'a>(
     let steps = full_order
         .into_iter()
         .filter_map(|t| {
-            if auto_skips.contains(t) {
-                None
-            } else if cli_skip_set.contains(t) {
+            if cli_skip_set.contains(t) {
                 Some(Step::Skip(t))
             } else if order_set.contains(t) {
                 Some(Step::Run(t))
@@ -328,8 +336,6 @@ impl<'a> ExecutionPlan<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::{execution_order, execution_order_with_skips, validate};
     use crate::{
         error::Error,
@@ -359,7 +365,6 @@ mod tests {
             depends_on: depends_on.iter().map(|d| (*d).to_string()).collect(),
             skip_deps: skip_deps.iter().map(|s| (*s).to_string()).collect(),
             tools: Vec::new(),
-            platform: None,
         }
     }
 
@@ -375,7 +380,7 @@ mod tests {
     fn diamond_runs_each_prerequisite_once() -> TestResult {
         // a -> {b, c}, b -> d, c -> d
         let targets = graph(&[("a", &["b", "c"]), ("b", &["d"]), ("c", &["d"]), ("d", &[])]);
-        validate(&targets)?;
+        validate(&targets, &IndexMap::new())?;
         let order = execution_order(&targets, &["a"])?;
         assert_eq!(order, vec!["d", "b", "c", "a"]);
         Ok(())
@@ -391,7 +396,7 @@ mod tests {
             ("shared", &[]),
             ("other", &[]),
         ]);
-        validate(&targets)?;
+        validate(&targets, &IndexMap::new())?;
         let order = execution_order(&targets, &["x", "y"])?;
         assert_eq!(order, vec!["shared", "x", "shared", "y"]);
         Ok(())
@@ -400,7 +405,7 @@ mod tests {
     #[test]
     fn duplicate_roots_run_each_time() -> TestResult {
         let targets = graph(&[("a", &[])]);
-        validate(&targets)?;
+        validate(&targets, &IndexMap::new())?;
         let order = execution_order(&targets, &["a", "a"])?;
         assert_eq!(order, vec!["a", "a"]);
         Ok(())
@@ -421,7 +426,7 @@ mod tests {
     #[test]
     fn unknown_dependency_is_rejected() -> TestResult {
         let targets = graph(&[("a", &["missing"])]);
-        match validate(&targets) {
+        match validate(&targets, &IndexMap::new()) {
             Err(Error::UnknownDependency { target, dependency }) => {
                 assert_eq!(target, "a");
                 assert_eq!(dependency, "missing");
@@ -432,9 +437,24 @@ mod tests {
     }
 
     #[test]
+    fn excluded_dependency_is_silently_accepted_at_parse_time() -> TestResult {
+        // `a` depends on `mac`, which is in the excluded map (macos-only).
+        // validate() must accept this silently: excluded deps are pruned during
+        // execution by build_order, not rejected at parse time.
+        let mut targets = graph(&[("a", &[])]);
+        let excluded: IndexMap<String, Vec<String>> =
+            [("mac".to_string(), vec!["macos".to_string()])]
+                .into_iter()
+                .collect();
+        targets.get_mut("a").unwrap().depends_on = vec!["mac".to_string()];
+        validate(&targets, &excluded)?;
+        Ok(())
+    }
+
+    #[test]
     fn cycle_is_reported_with_path() -> TestResult {
         let targets = graph(&[("a", &["b"]), ("b", &["a"])]);
-        match validate(&targets) {
+        match validate(&targets, &IndexMap::new()) {
             Err(Error::CircularDependency { cycle }) => {
                 assert_eq!(
                     cycle.first().map(String::as_str),
@@ -461,11 +481,28 @@ mod tests {
     }
 
     #[test]
+    fn excluded_root_gives_platform_error() -> TestResult {
+        let targets = graph(&[("build", &[])]);
+        let excluded: IndexMap<String, Vec<String>> =
+            [("mac".to_string(), vec!["macos".to_string()])]
+                .into_iter()
+                .collect();
+        match execution_order_with_skips(&targets, &excluded, &["mac"], &[]) {
+            Err(Error::TargetNotAvailableOnPlatform { name, available_on }) => {
+                assert_eq!(name, "mac");
+                assert_eq!(available_on, vec!["macos".to_string()]);
+                Ok(())
+            }
+            other => Err(format!("expected TargetNotAvailableOnPlatform, got {other:?}").into()),
+        }
+    }
+
+    #[test]
     fn skip_excludes_direct_only_dependency() -> TestResult {
         // a -> {b, c}; skip c (nothing else needs it).
         let targets = graph(&[("a", &["b", "c"]), ("b", &[]), ("c", &[])]);
-        validate(&targets)?;
-        let plan = execution_order_with_skips(&targets, &["a"], &["c"], &HashSet::new())?;
+        validate(&targets, &IndexMap::new())?;
+        let plan = execution_order_with_skips(&targets, &IndexMap::new(), &["a"], &["c"])?;
         assert_eq!(plan.order(), vec!["b", "a"]);
         assert_eq!(plan.skipped(), vec!["c"]);
         Ok(())
@@ -481,8 +518,8 @@ mod tests {
             ("build", &[]),
             ("wipe", &[]),
         ]);
-        validate(&targets)?;
-        let plan = execution_order_with_skips(&targets, &["a"], &["clean"], &HashSet::new())?;
+        validate(&targets, &IndexMap::new())?;
+        let plan = execution_order_with_skips(&targets, &IndexMap::new(), &["a"], &["clean"])?;
         assert_eq!(plan.order(), vec!["build", "a"]);
         assert!(!plan.order().contains(&"wipe"));
         assert_eq!(plan.skipped(), vec!["clean"]);
@@ -494,8 +531,8 @@ mod tests {
         // a -> build -> clean. `build` (not a root) needs clean, so clean cannot
         // be skipped.
         let targets = graph(&[("a", &["build"]), ("build", &["clean"]), ("clean", &[])]);
-        validate(&targets)?;
-        match execution_order_with_skips(&targets, &["a"], &["clean"], &HashSet::new()) {
+        validate(&targets, &IndexMap::new())?;
+        match execution_order_with_skips(&targets, &IndexMap::new(), &["a"], &["clean"]) {
             Err(Error::SkipNotAllowed { target, dependents }) => {
                 assert_eq!(target, "clean");
                 assert_eq!(dependents, "build");
@@ -510,8 +547,9 @@ mod tests {
         // x -> shared, y -> shared. Both dependents are named roots, which are
         // exempt, so skipping shared is allowed.
         let targets = graph(&[("x", &["shared"]), ("y", &["shared"]), ("shared", &[])]);
-        validate(&targets)?;
-        let plan = execution_order_with_skips(&targets, &["x", "y"], &["shared"], &HashSet::new())?;
+        validate(&targets, &IndexMap::new())?;
+        let plan =
+            execution_order_with_skips(&targets, &IndexMap::new(), &["x", "y"], &["shared"])?;
         assert_eq!(plan.order(), vec!["x", "y"]);
         // Each root's graph runs independently, so the skip appears once per
         // root at the position where shared would have run.
@@ -522,7 +560,7 @@ mod tests {
     #[test]
     fn unknown_skip_target_is_rejected() -> TestResult {
         let targets = graph(&[("a", &[])]);
-        match execution_order_with_skips(&targets, &["a"], &["nope"], &HashSet::new()) {
+        match execution_order_with_skips(&targets, &IndexMap::new(), &["a"], &["nope"]) {
             Err(Error::UnknownTarget { name }) => {
                 assert_eq!(name, "nope");
                 Ok(())
@@ -535,8 +573,8 @@ mod tests {
     fn skip_target_not_in_run_graph_is_noop() -> TestResult {
         // `b` exists but is not part of `a`'s graph: nothing to prune.
         let targets = graph(&[("a", &[]), ("b", &[])]);
-        validate(&targets)?;
-        let plan = execution_order_with_skips(&targets, &["a"], &["b"], &HashSet::new())?;
+        validate(&targets, &IndexMap::new())?;
+        let plan = execution_order_with_skips(&targets, &IndexMap::new(), &["a"], &["b"])?;
         assert_eq!(plan.order(), vec!["a"]);
         assert!(plan.skipped().is_empty());
         Ok(())
@@ -546,7 +584,7 @@ mod tests {
     fn validate_rejects_unknown_skip_dep() -> TestResult {
         let mut targets = graph(&[("a", &[])]);
         targets.get_mut("a").unwrap().skip_deps = vec!["ghost".to_string()];
-        match validate(&targets) {
+        match validate(&targets, &IndexMap::new()) {
             Err(Error::UnknownDependency { target, dependency }) => {
                 assert_eq!(target, "a");
                 assert_eq!(dependency, "ghost");
@@ -560,7 +598,7 @@ mod tests {
     fn validate_rejects_conflicting_dep_and_skip_dep() -> TestResult {
         let mut targets = graph(&[("a", &["b"]), ("b", &[])]);
         targets.get_mut("a").unwrap().skip_deps = vec!["b".to_string()];
-        match validate(&targets) {
+        match validate(&targets, &IndexMap::new()) {
             Err(Error::ConflictingDependency { target, name }) => {
                 assert_eq!(target, "a");
                 assert_eq!(name, "b");
@@ -580,8 +618,8 @@ mod tests {
         drop(targets.insert("clean".to_string(), target(&[])));
         drop(targets.insert("all".to_string(), target(&["build", "clean"])));
         drop(targets.insert("ci".to_string(), target_full(&["all"], &["clean"])));
-        validate(&targets)?;
-        let plan = execution_order_with_skips(&targets, &["ci"], &[], &HashSet::new())?;
+        validate(&targets, &IndexMap::new())?;
+        let plan = execution_order_with_skips(&targets, &IndexMap::new(), &["ci"], &[])?;
         assert_eq!(plan.order(), vec!["build", "all", "ci"]);
         assert!(!plan.order().contains(&"clean"));
         assert_eq!(plan.skipped(), vec!["clean"]);
@@ -598,8 +636,8 @@ mod tests {
         drop(targets.insert("all".to_string(), target(&["build", "clean"])));
         drop(targets.insert("ci".to_string(), target_full(&["all"], &["clean"])));
         drop(targets.insert("deploy".to_string(), target(&["ci"])));
-        validate(&targets)?;
-        let plan = execution_order_with_skips(&targets, &["deploy"], &[], &HashSet::new())?;
+        validate(&targets, &IndexMap::new())?;
+        let plan = execution_order_with_skips(&targets, &IndexMap::new(), &["deploy"], &[])?;
         assert_eq!(plan.order(), vec!["build", "all", "ci", "deploy"]);
         assert!(!plan.order().contains(&"clean"));
         assert_eq!(plan.skipped(), vec!["clean"]);
@@ -615,46 +653,10 @@ mod tests {
         drop(targets.insert("clean".to_string(), target(&[])));
         drop(targets.insert("all".to_string(), target(&["build", "clean"])));
         drop(targets.insert("ci".to_string(), target_full(&["all"], &["clean"])));
-        validate(&targets)?;
-        let plan = execution_order_with_skips(&targets, &["ci", "clean"], &[], &HashSet::new())?;
+        validate(&targets, &IndexMap::new())?;
+        let plan = execution_order_with_skips(&targets, &IndexMap::new(), &["ci", "clean"], &[])?;
         // `clean` is a root, so it must appear in the order
         assert!(plan.order().contains(&"clean"));
-        Ok(())
-    }
-
-    #[test]
-    fn auto_skip_prunes_target_silently() -> TestResult {
-        // `mac` is auto-skipped (platform-excluded). It must not appear as
-        // Step::Skip or Step::Run — it simply vanishes from the plan.
-        let targets = graph(&[("build", &[]), ("mac", &[])]);
-        let auto_skips: HashSet<&str> = ["mac"].into();
-        let plan = execution_order_with_skips(&targets, &["build", "mac"], &[], &auto_skips)?;
-        assert_eq!(plan.order(), vec!["build"]);
-        assert!(plan.skipped().is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn auto_skip_drops_orphaned_dependency() -> TestResult {
-        // `all` depends on `mac` (auto-skipped) and `build`. On the current
-        // host `mac` is excluded: it vanishes silently and `build` + `all` run.
-        let targets = graph(&[("all", &["mac", "build"]), ("mac", &[]), ("build", &[])]);
-        let auto_skips: HashSet<&str> = ["mac"].into();
-        let plan = execution_order_with_skips(&targets, &["all"], &[], &auto_skips)?;
-        assert_eq!(plan.order(), vec!["build", "all"]);
-        assert!(plan.skipped().is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn auto_skip_does_not_trigger_skip_not_allowed() -> TestResult {
-        // `build` (non-root) depends on `mac` (auto-skipped). Unlike a
-        // CLI-requested skip, this must not produce SkipNotAllowed.
-        let targets = graph(&[("all", &["build"]), ("build", &["mac"]), ("mac", &[])]);
-        let auto_skips: HashSet<&str> = ["mac"].into();
-        let plan = execution_order_with_skips(&targets, &["all"], &[], &auto_skips)?;
-        assert_eq!(plan.order(), vec!["build", "all"]);
-        assert!(plan.skipped().is_empty());
         Ok(())
     }
 }

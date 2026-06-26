@@ -316,15 +316,13 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 /// # Ok::<(), librake::Error>(())
 /// ```
 ///
-/// A platform-scoped target includes a `    platform:` line in the output:
+/// Platform-specific variants are resolved at parse time; only the matching
+/// variant (or base) appears in the output:
 ///
 /// ```
 /// use librake::{Rakefile, list_targets};
 ///
 /// let toml = r#"
-/// [target.sign]
-/// platform = ["macos"]
-///
 /// [[target.sign.command]]
 /// name = "notarize"
 /// cmd  = ["xcrun", "notarytool", "submit"]
@@ -332,7 +330,8 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 ///
 /// let rakefile = Rakefile::from_toml_str(toml)?;
 /// let out = list_targets(&rakefile);
-/// assert!(out.contains("sign\n    platform: macos\n"), "got: {out}");
+/// assert!(out.contains("sign"), "got: {out}");
+/// assert!(out.contains("notarize"), "got: {out}");
 /// # Ok::<(), librake::Error>(())
 /// ```
 ///
@@ -366,9 +365,6 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
 
     for (name, target) in rakefile.targets() {
         let _ = writeln!(out, "{name}");
-        if let Some(platforms) = &target.platform {
-            let _ = writeln!(out, "    platform: {}", platforms.join(", "));
-        }
         if !target.depends_on.is_empty() || !target.skip_deps.is_empty() {
             let all: Vec<String> = target
                 .depends_on

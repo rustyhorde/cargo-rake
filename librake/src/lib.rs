@@ -11,7 +11,10 @@
 //! [`ToolTable`]). Targets are parsed and validated by [`Rakefile`] and run in
 //! dependency order via [`Rakefile::run`] (or previewed without execution via
 //! [`Rakefile::run_dry`]); commands run in array order after referenced tools
-//! have been ensured.
+//! have been ensured. The optional top-level `update` key (default `true`)
+//! controls whether `cargo-rake` checks crates.io for a newer version of itself
+//! on startup and installs it automatically; see [`ensure_self_update`] and
+//! [`Rakefile::update`].
 
 //! librake
 

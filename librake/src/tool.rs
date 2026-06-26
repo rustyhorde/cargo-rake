@@ -286,6 +286,17 @@ impl ToolTable {
 /// on Windows before installation, or [`Error::ToolInstallSpawn`] /
 /// [`Error::ToolInstallFailed`] if `cargo install cargo-rake` cannot be
 /// launched or exits non-zero.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Pass the running binary's version string; `true` means a new version was
+/// // installed and the caller should relaunch the updated binary.
+/// if librake::ensure_self_update(env!("CARGO_PKG_VERSION"))? {
+///     // relaunch the updated binary with the original arguments
+/// }
+/// # Ok::<(), librake::Error>(())
+/// ```
 pub fn ensure_self_update(current_version: &str) -> Result<bool> {
     const NAME: &str = "cargo-rake";
     eprint_tool("Checking", "check", NAME, &[], 0);
@@ -1164,6 +1175,22 @@ cmd = ["cargo", "matrix", "build"]
         // registry lookup or install attempt.
         let updated = super::ensure_self_update("not-a-version")?;
         assert!(!updated, "unparseable version should not trigger an update");
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_self_update_already_up_to_date() -> TestResult {
+        // With network: latest_crate_version("cargo-rake") returns the real
+        // published version (e.g. 0.4.2), which is <= 99999.0.0, so the
+        // "Up to date" branch is taken and Ok(false) is returned.
+        // Without network: the version check errors out and the Warning branch
+        // is taken instead — also Ok(false).  Either way no install is
+        // triggered and the assertion holds.
+        let updated = super::ensure_self_update("99999.0.0")?;
+        assert!(
+            !updated,
+            "impossibly high version should never trigger an install"
+        );
         Ok(())
     }
 

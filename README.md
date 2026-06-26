@@ -113,6 +113,26 @@ brew tap rustyhorde/rake
 brew install rake
 ```
 
+## Self-Update
+
+`cargo-rake` (the `cargo rake` subcommand) checks crates.io for a newer version of itself on
+every startup and installs it automatically via `cargo install cargo-rake` if one is found. After
+a successful update, the binary relaunches itself with the original arguments so the newly
+installed version handles the actual work.
+
+`rake` (the standalone binary) is distributed through system package managers and does not
+self-update via this mechanism — use your package manager to update it.
+
+**Opt out** per-project by adding `update = false` to your `Rakefile.toml`:
+
+```toml
+update = false
+```
+
+When the key is absent the check is **enabled** (default `true`). The check is skipped entirely
+in `--dry-run` mode. Network and version-check failures are non-fatal: a `Warning` line is
+printed and the run continues normally.
+
 ## Rakefile.toml
 
 A `Rakefile.toml` declares named **targets**. Each target owns an ordered array
@@ -121,6 +141,7 @@ list. Tools are defined once in a top-level `[tool]` table. A complete example:
 
 ```toml
 # toolchain = "stable"   # optional; pins both binaries to a specific Rust channel via rustup
+# update    = false      # optional; set false to disable cargo-rake's self-update check
 
 # Cargo-installable tools (cargo subcommands, etc.)
 [tool.cargo.nextest]

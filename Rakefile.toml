@@ -37,6 +37,12 @@
 #   [target.<name>]
 #     depends_on = []      # default. Targets to run first, in order.
 #     tools      = []      # default. Tool names (from [tool.*]) to ensure first.
+#     platform   = []      # OPTIONAL, default: unset (every platform). OS and/or
+#                          # family tokens (e.g. "linux", "macos", "unix"). When
+#                          # set, the whole target (and any dep reachable only
+#                          # through it) is silently pruned before graph building
+#                          # on non-matching hosts. Commands in a platform-scoped
+#                          # target must not declare their own platform — error.
 #
 #   [[target.<name>.command]]
 #     name          = "..."   # REQUIRED. Label shown in --list and errors;
@@ -61,6 +67,9 @@
 #                             # "windows", or the family "unix"); the command runs
 #                             # only when the host's OS or family matches one,
 #                             # else it is silently skipped (Skipped line).
+#                             # Cannot be used inside a target that already
+#                             # declares a top-level platform — that is a
+#                             # syntax error (CommandPlatformInPlatformTarget).
 #     arch          = [...]   # OPTIONAL, default: unset (every architecture).
 #                             # Arch tokens (e.g. "x86_64", "aarch64"); combined
 #                             # with `platform` as a logical AND.
@@ -104,10 +113,27 @@ hint = "The 'puc' fish function is required to run this target"
 
 [target.puc]
 tools = ["puc"]
+platform = ["linux"]
+
 [[target.puc.command]]
 name = "puc"
-platform = ["linux"]
 fish = "puc"
+
+# ---------------------------------------------------------------------------
+# platform-scoped target example
+#
+# This target is declared for linux only. On macOS or Windows the whole target
+# (and any dep reachable only through it) is silently pruned before the graph
+# is built — no Skipped line, just a narrower graph. Commands in a
+# platform-scoped target must not re-declare platform; that is a syntax error.
+# ---------------------------------------------------------------------------
+
+[target.linux-only]
+platform = ["linux"]
+
+[[target.linux-only.command]]
+name = "uname"
+cmd  = ["uname", "-r"]
 
 # ---------------------------------------------------------------------------
 # fmt

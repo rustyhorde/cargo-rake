@@ -293,8 +293,11 @@ pub fn exit_code(status: ExitStatus) -> i32 {
     }
 }
 
-/// Render the targets of `rakefile` for display, in declaration order, showing
-/// each command's body (cmd or shell variants) and any `depends_on`.
+/// Render the targets of `rakefile` for display, in declaration order. For
+/// each target the output shows the target name; a `    platform: <tokens>`
+/// line when the target declares a top-level `platform`; `depends_on` and
+/// `tools` summaries; and each command's name and body (cmd or shell variants)
+/// with per-command `(platform: …)`/`(arch: …)`/`(tools: …)`/`(skip_on_error)` markers.
 ///
 /// # Examples
 ///
@@ -309,6 +312,47 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 /// assert!(out.contains("cargo build"));
 /// # Ok::<(), librake::Error>(())
 /// ```
+///
+/// A platform-scoped target includes a `    platform:` line in the output:
+///
+/// ```
+/// use librake::{Rakefile, list_targets};
+///
+/// let toml = r#"
+/// [target.sign]
+/// platform = ["macos"]
+///
+/// [[target.sign.command]]
+/// name = "notarize"
+/// cmd  = ["xcrun", "notarytool", "submit"]
+/// "#;
+///
+/// let rakefile = Rakefile::from_toml_str(toml)?;
+/// let out = list_targets(&rakefile);
+/// assert!(out.contains("sign\n    platform: macos\n"), "got: {out}");
+/// # Ok::<(), librake::Error>(())
+/// ```
+///
+/// A command with command-level tools shows a `(tools: …)` marker:
+///
+/// ```
+/// use librake::{Rakefile, list_targets};
+///
+/// let toml = r#"
+/// [tool.os.docker]
+/// check = ["docker", "--version"]
+///
+/// [[target.build.command]]
+/// name  = "package"
+/// cmd   = ["docker", "build", "."]
+/// tools = ["docker"]
+/// "#;
+///
+/// let rakefile = Rakefile::from_toml_str(toml)?;
+/// let out = list_targets(&rakefile);
+/// assert!(out.contains("(tools: docker)"), "got: {out}");
+/// # Ok::<(), librake::Error>(())
+/// ```
 #[must_use]
 pub fn list_targets(rakefile: &Rakefile) -> String {
     let mut out = String::new();
@@ -319,6 +363,9 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
 
     for (name, target) in rakefile.targets() {
         let _ = writeln!(out, "{name}");
+        if let Some(platforms) = &target.platform {
+            let _ = writeln!(out, "    platform: {}", platforms.join(", "));
+        }
         if !target.depends_on.is_empty() || !target.skip_deps.is_empty() {
             let all: Vec<String> = target
                 .depends_on
@@ -338,6 +385,9 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
             }
             if let Some(arches) = &command.arch {
                 let _ = write!(marker, " (arch: {})", arches.join(", "));
+            }
+            if !command.tools.is_empty() {
+                let _ = write!(marker, " (tools: {})", command.tools.join(", "));
             }
             if command.skip_on_error {
                 marker.push_str(" (skip_on_error)");

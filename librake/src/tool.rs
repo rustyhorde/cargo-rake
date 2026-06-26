@@ -200,6 +200,35 @@ pub(crate) fn validate(tools: &ToolTable, targets: &IndexMap<String, Target>) ->
             }
         }
     }
+
+    // Validate command-level tool references: each must resolve against the
+    // ToolTable, and must not duplicate a tool already declared at the target level
+    // (declare it at one level only).
+    for (tname, target) in targets {
+        let target_tool_set: std::collections::HashSet<&str> =
+            target.tools.iter().map(String::as_str).collect();
+        for command in &target.commands {
+            for tool in &command.tools {
+                if !tools.cargo.contains_key(tool)
+                    && !tools.os.contains_key(tool)
+                    && !tools.fish.contains_key(tool)
+                {
+                    return Err(Error::UnknownCommandTool {
+                        target: tname.clone(),
+                        command: command.name.clone(),
+                        tool: tool.clone(),
+                    });
+                }
+                if target_tool_set.contains(tool.as_str()) {
+                    return Err(Error::ToolDeclaredAtBothLevels {
+                        target: tname.clone(),
+                        command: command.name.clone(),
+                        tool: tool.clone(),
+                    });
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -632,6 +661,44 @@ cmd = ["cargo", "matrix", "build"]
                 Ok(())
             }
             other => Err(format!("expected UnknownTool, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn unknown_command_tool_reference_is_rejected() -> TestResult {
+        let toml = "[[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\ntools = [\"nope\"]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::UnknownCommandTool {
+                target,
+                command,
+                tool,
+            }) => {
+                assert_eq!(target, "build");
+                assert_eq!(command, "c");
+                assert_eq!(tool, "nope");
+                Ok(())
+            }
+            other => Err(format!("expected UnknownCommandTool, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn tool_declared_at_both_levels_is_rejected() -> TestResult {
+        let toml = "[tool.cargo.t]\ncheck = [\"true\"]\ninstall = [\"true\"]\n\
+                    [target.build]\ntools = [\"t\"]\n\
+                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\ntools = [\"t\"]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::ToolDeclaredAtBothLevels {
+                target,
+                command,
+                tool,
+            }) => {
+                assert_eq!(target, "build");
+                assert_eq!(command, "c");
+                assert_eq!(tool, "t");
+                Ok(())
+            }
+            other => Err(format!("expected ToolDeclaredAtBothLevels, got {other:?}").into()),
         }
     }
 

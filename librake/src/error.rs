@@ -116,6 +116,41 @@ pub enum Error {
         /// Which gating key was empty: `platform` or `arch`.
         key: &'static str,
     },
+    /// A target's top-level `platform` list named an unrecognized token (likely
+    /// a typo). Validated at parse time so the error is surfaced before any
+    /// execution occurs.
+    #[error(
+        "target '{target}' has invalid platform '{token}' (valid: an OS like linux, macos, windows, freebsd, \u{2026} or a family like unix, windows)"
+    )]
+    InvalidTargetPlatform {
+        /// The offending target name.
+        target: String,
+        /// The unrecognized platform token.
+        token: String,
+    },
+    /// A target's top-level `platform` list was declared but is empty, which
+    /// would exclude the target on every host.
+    #[error(
+        "target '{target}' has an empty 'platform' list (omit it to run everywhere, or list at least one token)"
+    )]
+    EmptyTargetPlatformList {
+        /// The offending target name.
+        target: String,
+    },
+    /// A command inside a platform-scoped target also declares its own
+    /// `platform`, which is redundant and therefore a syntax error — the
+    /// target's platform already scopes every command within it.
+    #[error(
+        "target '{target}' command '{command}' declares 'platform' but the target is already restricted to '{target_platforms}' \u{2014} remove 'platform' from the command"
+    )]
+    CommandPlatformInPlatformTarget {
+        /// The platform-scoped target.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// The target's platform list, comma-joined, shown in the error.
+        target_platforms: String,
+    },
     /// A target declared two commands with the same `name`.
     #[error(
         "target '{target}' declares duplicate command name '{command}' (each [[target.{target}.command]] must have a unique name)"
@@ -186,6 +221,31 @@ pub enum Error {
         /// The target declaring the tool dependency.
         target: String,
         /// The missing tool name.
+        tool: String,
+    },
+    /// A command's `tools` listed a name with no matching tool entry in any
+    /// category (`[tool.cargo]`, `[tool.os]`, or `[tool.fish]`).
+    #[error("target '{target}' command '{command}' needs unknown tool '{tool}'")]
+    UnknownCommandTool {
+        /// The target that owns the offending command.
+        target: String,
+        /// The offending command's name.
+        command: String,
+        /// The missing tool name.
+        tool: String,
+    },
+    /// A tool name appears in both the target's `tools` list and a command's
+    /// `tools` list within the same target — declare it at one level only.
+    #[error(
+        "target '{target}' command '{command}' tool '{tool}' is already declared at the target \
+         level \u{2014} declare it at one level only"
+    )]
+    ToolDeclaredAtBothLevels {
+        /// The target with the conflicting tool reference.
+        target: String,
+        /// The command whose `tools` list duplicates a target-level tool.
+        command: String,
+        /// The tool name declared at both levels.
         tool: String,
     },
     /// A tool's `check` or `install` command was declared empty.

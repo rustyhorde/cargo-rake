@@ -178,8 +178,20 @@ tools = ["puc"]
 name = "puc"
 fish = "puc"
 
+# Whole target scoped to macOS — silently pruned before graph building on every
+# other host. Commands inside a platform-scoped target must not re-declare
+# platform; that is a syntax error.
+[target.notarize]
+platform = ["macos"]
+
+[[target.notarize.command]]
+name = "submit"
+cmd  = ["xcrun", "notarytool", "submit", "dist.pkg"]
+
 [target.all]
-depends_on = ["build", "test", "check", "package"]  # depends-only aggregator
+# `notarize` is platform = ["macos"]; it is auto-pruned on other hosts with no
+# extra configuration needed — just list it as a normal dependency.
+depends_on = ["build", "test", "check", "package", "notarize"]
 
 [target.default]
 depends_on = ["test"]
@@ -214,14 +226,35 @@ depends_on = ["test"]
   entry with `^` (e.g. `depends_on = ["all", "^install"]`) to embed a skip for that
   dependency — the skipped target (and any dep reachable only through it) is pruned
   whenever this target is in the run. This complements the CLI `^target` syntax.
-- **`tools`** lists external tools (by name) the target needs; see [Tools](#tools).
-- **`platform`** (optional list) names OS or family tokens (`linux`/`macos`/
-  `windows`/`unix`/…); **`arch`** names architecture tokens
-  (`x86_64`/`aarch64`/…). A command runs only when every declared dimension
-  matches (AND across dimensions, OR within each list). A non-matching command
-  is **silently skipped** — a `Skipped` status line is printed and execution
-  continues. Both lists are validated at parse time; an empty list or an unknown
-  token is a hard error.
+- **`tools`** — tools can be declared at **two levels**: on `[target.<name>]`
+  (ensured before every command in that target) or on
+  `[[target.<t>.command]]` (ensured immediately before that specific command,
+  and only when it is not platform/arch-skipped). A name declared at both
+  levels for the same target is a parse-time error. See [Tools](#tools).
+- **`platform`** (target-level, optional list) — the same OS/family tokens as
+  command-level `platform` (`linux`/`macos`/`unix`/…). When set on
+  `[target.<name>]`, the whole target and any dependency reachable *only*
+  through it are silently pruned from the run on non-matching hosts, before
+  the dependency graph is built. Commands inside a platform-scoped target must
+  not also declare `platform` — that is a parse-time error. See the `notarize`
+  target above for a usage example.
+- **`platform`** (optional list, on a target or a command) names OS or family
+  tokens (`linux`/`macos`/`windows`/`unix`/…). **`arch`** (optional list, per
+  command only) names architecture tokens (`x86_64`/`aarch64`/…). Both lists are
+  validated at parse time; an empty list or an unknown token is a hard error.
+  The two levels behave differently:
+  - **Target-level `platform`** (set on `[target.<name>]`) scopes the whole
+    target: it and any dependency reachable *only* through it are **silently
+    pruned before the dependency graph is built** on non-matching hosts — no
+    `Skipped` line is printed. This lets a cross-platform `all` target list
+    platform-specific sub-targets as normal dependencies without `if`-chains.
+    Commands inside a platform-scoped target must **not** declare their own
+    `platform` — that is a parse-time error.
+  - **Command-level `platform`** (set on `[[target.<t>.command]]`) gates a
+    single command at run time: a non-matching command is **silently skipped**
+    — a `Skipped` status line is printed and the target's remaining commands
+    continue. A command runs only when every declared dimension matches (AND
+    across `platform`/`arch`, OR within each list).
 - **Skipping targets**: prefix a target name with `^` to exclude it from the run
   (e.g. `rake all ^clean`). The skipped target and any dependency reachable only
   through it are pruned. A skip is not allowed if another non-root target that
@@ -234,14 +267,52 @@ Tools are defined in a top-level `[tool]` table, split into three categories:
 **`[tool.cargo.<name>]`** for cargo-installable tools (cargo subcommands and
 the like), **`[tool.os.<name>]`** for OS-level dependencies (`docker`,
 `pkg-config`, …) that `rake` cannot `cargo install`, and **`[tool.fish.<name>]`**
-for fish shell function dependencies. A target references any kind by name from
-its `tools` list (the three categories share one flat reference namespace, so a
-name must be unique across all of them).
+for fish shell function dependencies. The three categories share one flat
+reference namespace, so a name must be unique across all of them.
 
-Tools are ensured lazily: a tool's `check` only runs when a target that
-references it is actually run (never at parse time or for unrelated targets), and
-at most once per run. Before a target's commands run, each tool it references is
-ensured:
+Tools can be referenced at **two levels**:
+
+- **Target-level** (`tools = [...]` on `[target.<name>]`): the named tools are
+  ensured before any of the target's commands run.
+- **Command-level** (`tools = [...]` on `[[target.<t>.command]]`): the named
+  tools are ensured immediately before *that specific command* runs — and only
+  when the command is not already skipped by its `platform`/`arch` gates. This
+  lets platform-specific commands declare their own tool dependencies without
+  requiring the same tools on every platform.
+
+A tool name may not appear in both a target's `tools` list and a command's
+`tools` list within the same target — that is a parse-time error. Use
+target-level `tools` when a dependency is shared by all commands in the target,
+and command-level `tools` when only a specific (often platform-gated) command
+needs it:
+
+```toml
+[tool.os.gpg]
+check = ["gpg", "--version"]
+
+[tool.os.xcrun]
+check = ["xcrun", "--version"]
+
+[target.sign]
+# No target-level tools here — each platform needs a different signing tool.
+
+[[target.sign.command]]
+name     = "gpg-sign"
+platform = ["linux"]
+sh       = "gpg --detach-sign dist.tgz"
+tools    = ["gpg"]                  # only ensured on linux
+
+[[target.sign.command]]
+name     = "notarize"
+platform = ["macos"]
+cmd      = ["xcrun", "notarytool", "submit", "dist.pkg"]
+tools    = ["xcrun"]                # only ensured on macOS
+```
+
+Tools are ensured lazily: a tool's `check` only runs when a target (or command)
+that references it is actually run (never at parse time or for unrelated targets),
+and at most once per run across both levels. Before a target's commands run, each
+tool it references is ensured:
 
 - The **`check`** command probes whether the tool is already installed: it must
   **exit 0 when the tool is present**. For a cargo subcommand this means

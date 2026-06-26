@@ -852,6 +852,17 @@ cmd = ["cargo", "matrix", "build"]
         assert_eq!(super::parse_installed_version(b"", b"no version"), None);
     }
 
+    // Platform-portable exit-0 / exit-1 command slices for tool check/install fields.
+    #[cfg(windows)]
+    const EXIT0: &[&str] = &["cmd", "/c", "exit", "0"];
+    #[cfg(not(windows))]
+    const EXIT0: &[&str] = &["true"];
+
+    #[cfg(windows)]
+    const EXIT1: &[&str] = &["cmd", "/c", "exit", "1"];
+    #[cfg(not(windows))]
+    const EXIT1: &[&str] = &["false"];
+
     /// Build a one-tool [`CargoTool`] for the `ensure_cargo` tests.
     fn tool(check: &[&str], install: &[&str]) -> CargoTool {
         CargoTool {
@@ -875,29 +886,28 @@ cmd = ["cargo", "matrix", "build"]
     #[test]
     fn ensure_present_tool_skips_install() -> TestResult {
         // `check` succeeds, so `install` (which would fail) must not run.
-        ensure_cargo("present", &tool(&["true"], &["false"]), 0)?;
+        ensure_cargo("present", &tool(EXIT0, EXIT1), 0)?;
         Ok(())
     }
 
     #[test]
     fn ensure_absent_tool_installs() -> TestResult {
         // `check` fails (absent) so `install` runs and succeeds.
-        ensure_cargo("absent", &tool(&["false"], &["true"]), 0)?;
+        ensure_cargo("absent", &tool(EXIT1, EXIT0), 0)?;
         Ok(())
     }
 
     #[test]
     fn ensure_os_present_tool_is_ok() -> TestResult {
         // `check` succeeds, so a missing `install` is fine and no error fires.
-        ensure_os("present", &os_tool(&["true"], &[], None), 0)?;
+        ensure_os("present", &os_tool(EXIT0, &[], None), 0)?;
         Ok(())
     }
 
     #[test]
     fn ensure_os_absent_with_install_runs_it() -> TestResult {
-        // Absent (`check` = `false`), but a declared `install` (`true`) runs and
-        // succeeds.
-        ensure_os("absent", &os_tool(&["false"], &["true"], None), 0)?;
+        // Absent (`check` fails), but a declared `install` (exit 0) runs and succeeds.
+        ensure_os("absent", &os_tool(EXIT1, EXIT0, None), 0)?;
         Ok(())
     }
 
@@ -920,8 +930,8 @@ cmd = ["cargo", "matrix", "build"]
 
     #[test]
     fn ensure_os_absent_install_failure_is_error() -> TestResult {
-        // Absent with a declared `install` that fails (`false`) aborts the run.
-        match ensure_os("absent", &os_tool(&["false"], &["false"], None), 0) {
+        // Absent with a declared `install` that fails aborts the run.
+        match ensure_os("absent", &os_tool(EXIT1, EXIT1, None), 0) {
             Err(Error::ToolInstallFailed { tool, status }) => {
                 assert_eq!(tool, "absent");
                 assert!(!status.success());
@@ -938,7 +948,7 @@ cmd = ["cargo", "matrix", "build"]
         // reinstall (a reinstall would run `install` = `false` and surface
         // `ToolInstallFailed`). Runs offline: the `None` arm returns before any
         // registry lookup.
-        let mut tool = tool(&["true"], &["false"]);
+        let mut tool = tool(EXIT0, EXIT1);
         tool.update = true;
         tool.crate_name = Some("anything".to_string());
         ensure_cargo("present-no-version", &tool, 0)?;
@@ -947,7 +957,7 @@ cmd = ["cargo", "matrix", "build"]
 
     #[test]
     fn ensure_install_failure_is_error() -> TestResult {
-        match ensure_cargo("absent", &tool(&["false"], &["false"]), 0) {
+        match ensure_cargo("absent", &tool(EXIT1, EXIT1), 0) {
             Err(Error::ToolInstallFailed { tool, status }) => {
                 assert_eq!(tool, "absent");
                 assert!(!status.success());

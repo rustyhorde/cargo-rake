@@ -45,6 +45,11 @@ pub enum SemverCheck {
     CratesIo,
 }
 
+/// The status-line bracket tag used by cargo and OS tools: `[ check ]`.
+pub const CHECK_TAG: &str = "check";
+/// The status-line bracket tag used by fish function tools: `[ fish ]`.
+pub(crate) const FISH_TAG: &str = "fish";
+
 /// The top-level `[tool]` table, split into the three tool categories.
 ///
 /// `[tool.cargo.<name>]` entries deserialize into [`cargo`](ToolTable::cargo),
@@ -233,6 +238,32 @@ pub(crate) fn validate(tools: &ToolTable, targets: &IndexMap<String, Target>) ->
 }
 
 impl ToolTable {
+    /// The bracket tag string (`"check"` or `"fish"`) for the tool named `name`,
+    /// or `None` when the name does not appear in any category.
+    pub(crate) fn tag_for(&self, name: &str) -> Option<&'static str> {
+        if self.fish.contains_key(name) {
+            Some(FISH_TAG)
+        } else if self.cargo.contains_key(name) || self.os.contains_key(name) {
+            Some(CHECK_TAG)
+        } else {
+            None
+        }
+    }
+
+    /// The maximum `[ <tag> ]` bracket width across all tools in this table.
+    /// Returns `0` when the table is empty.
+    #[must_use]
+    pub fn max_tag_width(&self) -> usize {
+        let has_check = !self.cargo.is_empty() || !self.os.is_empty();
+        let has_fish = !self.fish.is_empty();
+        match (has_check, has_fish) {
+            (false, false) => 0,
+            (true, false) => CHECK_TAG.len(),
+            (false, true) => FISH_TAG.len(),
+            (true, true) => CHECK_TAG.len().max(FISH_TAG.len()),
+        }
+    }
+
     /// Ensure the tool referenced by `name` is available.
     ///
     /// Dispatches by category: a name in [`cargo`](ToolTable::cargo) is handled
@@ -247,11 +278,7 @@ impl ToolTable {
             // In dry-run mode, announce the dependency but skip the check and
             // any install — no processes are spawned. Use the same tag as the
             // live path so the output is consistent.
-            let tag = if self.fish.contains_key(name) {
-                "fish"
-            } else if self.cargo.contains_key(name) || self.os.contains_key(name) {
-                "check"
-            } else {
+            let Some(tag) = self.tag_for(name) else {
                 return Ok(());
             };
             eprint_tool("Checking", tag, name, &[], name_width);
@@ -299,12 +326,12 @@ impl ToolTable {
 /// ```
 pub fn ensure_self_update(current_version: &str, name_width: usize) -> Result<bool> {
     const NAME: &str = "cargo-rake";
-    eprint_tool("Checking", "check", NAME, &[], name_width);
+    eprint_tool("Checking", CHECK_TAG, NAME, &[], name_width);
 
     let Some(installed) = parse_version_token(current_version) else {
         eprint_tool(
             "Warning",
-            "check",
+            CHECK_TAG,
             NAME,
             &["could not determine installed version; keeping current".to_string()],
             name_width,
@@ -318,7 +345,7 @@ pub fn ensure_self_update(current_version: &str, name_width: usize) -> Result<bo
         Err(message) => {
             eprint_tool(
                 "Warning",
-                "check",
+                CHECK_TAG,
                 NAME,
                 &[format!("version check failed: {message}")],
                 name_width,
@@ -330,7 +357,7 @@ pub fn ensure_self_update(current_version: &str, name_width: usize) -> Result<bo
     if latest <= installed {
         eprint_tool(
             "Up to date",
-            "check",
+            CHECK_TAG,
             NAME,
             &[installed.to_string()],
             name_width,
@@ -340,7 +367,7 @@ pub fn ensure_self_update(current_version: &str, name_width: usize) -> Result<bo
 
     eprint_tool(
         "Updating",
-        "check",
+        CHECK_TAG,
         NAME,
         &[format!("{installed} -> {latest}")],
         name_width,
@@ -399,12 +426,12 @@ fn ensure_cargo(name: &str, tool: &CargoTool, name_width: usize) -> Result<()> {
         });
     };
 
-    eprint_tool("Checking", "check", name, &[], name_width);
+    eprint_tool("Checking", CHECK_TAG, name, &[], name_width);
     let output = ProcessCommand::new(program).args(args).output();
     let present = output.as_ref().is_ok_and(|o| o.status.success());
 
     if !present {
-        eprint_tool("Installing", "check", name, &tool.install, name_width);
+        eprint_tool("Installing", CHECK_TAG, name, &tool.install, name_width);
         return run_install(name, &tool.install);
     }
 
@@ -418,7 +445,7 @@ fn ensure_cargo(name: &str, tool: &CargoTool, name_width: usize) -> Result<()> {
         // Present and not an `update` tool: report what is already installed,
         // including the parsed version when the `check` output carried one.
         let detail = installed.map_or_else(Vec::new, |v| vec![v.to_string()]);
-        eprint_tool("Present", "check", name, &detail, name_width);
+        eprint_tool("Present", CHECK_TAG, name, &detail, name_width);
     }
     Ok(())
 }
@@ -444,12 +471,12 @@ fn ensure_os(name: &str, tool: &OsTool, name_width: usize) -> Result<()> {
         });
     };
 
-    eprint_tool("Checking", "check", name, &[], name_width);
+    eprint_tool("Checking", CHECK_TAG, name, &[], name_width);
     let output = ProcessCommand::new(program).args(args).output();
     let present = output.as_ref().is_ok_and(|o| o.status.success());
 
     if present {
-        eprint_tool("Present", "check", name, &[], name_width);
+        eprint_tool("Present", CHECK_TAG, name, &[], name_width);
         return Ok(());
     }
 
@@ -459,7 +486,7 @@ fn ensure_os(name: &str, tool: &OsTool, name_width: usize) -> Result<()> {
             hint: tool.hint.clone(),
         });
     }
-    eprint_tool("Installing", "check", name, &tool.install, name_width);
+    eprint_tool("Installing", CHECK_TAG, name, &tool.install, name_width);
     run_install(name, &tool.install)
 }
 
@@ -473,13 +500,13 @@ fn ensure_os(name: &str, tool: &OsTool, name_width: usize) -> Result<()> {
 /// The check covers user-defined functions, autoloaded functions, and builtins,
 /// matching what `fish -c "functions --query <name>"` reports.
 fn ensure_fish(name: &str, tool: &FishTool, name_width: usize) -> Result<()> {
-    eprint_tool("Checking", "fish", name, &[], name_width);
+    eprint_tool("Checking", FISH_TAG, name, &[], name_width);
     let present = ProcessCommand::new("fish")
         .args(["-c", &format!("functions --query {name}")])
         .status()
         .is_ok_and(|s| s.success());
     if present {
-        eprint_tool("Present", "fish", name, &[], name_width);
+        eprint_tool("Present", FISH_TAG, name, &[], name_width);
         Ok(())
     } else {
         Err(Error::RequiredToolMissing {
@@ -511,7 +538,7 @@ fn update_if_newer(
     let Some(installed) = installed else {
         eprint_tool(
             "Warning",
-            "check",
+            CHECK_TAG,
             name,
             &["could not determine installed version; keeping current".to_string()],
             name_width,
@@ -524,7 +551,7 @@ fn update_if_newer(
         Err(message) => {
             eprint_tool(
                 "Warning",
-                "check",
+                CHECK_TAG,
                 name,
                 &[format!("version check failed: {message}")],
                 name_width,
@@ -535,7 +562,7 @@ fn update_if_newer(
     if latest > *installed {
         eprint_tool(
             "Updating",
-            "check",
+            CHECK_TAG,
             name,
             &[format!("{installed} -> {latest}")],
             name_width,
@@ -544,7 +571,7 @@ fn update_if_newer(
     }
     eprint_tool(
         "Up to date",
-        "check",
+        CHECK_TAG,
         name,
         &[installed.to_string()],
         name_width,

@@ -264,7 +264,9 @@ cmd = ["cargo", "clean"]
 
 [[target.clean.command]]
 name = "rm lcov.info"
-cmd = ["rm", "-f", "lcov.info"]
+fish = "rm -f lcov.info"
+sh = "rm -f lcov.info"
+ps = "Remove-Item -Force lcov.info -ErrorAction Ignore"
 
 # ---------------------------------------------------------------------------
 # aggregates

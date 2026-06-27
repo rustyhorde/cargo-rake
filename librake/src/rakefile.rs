@@ -173,6 +173,11 @@ const KNOWN_OS: &[&str] = &[
 /// an OS (see [`KNOWN_OS`]) or one of these families.
 const KNOWN_FAMILY: &[&str] = &["unix", "windows", "wasm"];
 
+/// Keys that may appear directly in a `[target.X]` table as base fields.
+/// Any other key must be a recognized platform/family token (a variant sub-table)
+/// or it is rejected with [`Error::InvalidPlatformVariant`].
+const KNOWN_TARGET_BASE_KEYS: &[&str] = &["command", "depends_on", "tools"];
+
 /// Recognized architecture tokens for a command's `arch` list (the stable
 /// `target_arch` values [`std::env::consts::ARCH`] can report).
 const KNOWN_ARCH: &[&str] = &[
@@ -288,17 +293,22 @@ fn classify_shell(name: &str) -> ShellFamily {
 
 /// Resolve the [`ShellFamily`] from the relevant environment signals, in
 /// priority order (first match wins): a PowerShell env channel (any OS), then
-/// `PSModulePath` on non-Windows (pwsh on Linux/macOS), then `$SHELL`'s basename,
-/// then the platform default (`Ps` on Windows, else `Posix`). PowerShell is
-/// checked first because it does not set `$SHELL`.
+/// `PSModulePath` on non-Windows (pwsh on Linux/macOS), then `FISH_VERSION`
+/// (exported by fish to all child processes), then `$SHELL`'s basename, then
+/// the platform default (`Ps` on Windows, else `Posix`). PowerShell is checked
+/// first because it does not set `$SHELL`; `FISH_VERSION` is checked before
+/// `$SHELL` because `$SHELL` reflects the login shell, not the running shell.
 fn shell_family_from_env(
-    ps_channel: bool,
-    ps_module_nonwindows: bool,
+    has_ps_signal: bool,
+    fish_version: bool,
     shell: Option<&str>,
     is_windows: bool,
 ) -> ShellFamily {
-    if ps_channel || ps_module_nonwindows {
+    if has_ps_signal {
         return ShellFamily::Ps;
+    }
+    if fish_version {
+        return ShellFamily::Fish;
     }
     match shell.filter(|s| !s.is_empty()) {
         Some(shell) => {
@@ -312,6 +322,19 @@ fn shell_family_from_env(
 
 /// Detect the current shell family from the process environment.
 ///
+/// The detection follows a fixed priority order (first match wins):
+///
+/// 0. `RAKE_SHELL` env variable — set to any shell name (`fish`, `sh`, `bash`,
+///    `pwsh`, …) to pin the family, skipping all other detection.
+/// 1. `POWERSHELL_DISTRIBUTION_CHANNEL` or `PSModulePath` (non-Windows only) —
+///    checked before `$SHELL` because PowerShell does not set `$SHELL`.
+/// 2. `FISH_VERSION` env variable — exported by fish to all child processes;
+///    checked before `$SHELL` because `$SHELL` reflects the login shell, not
+///    the running shell.
+/// 3. `$SHELL`'s basename — classified into a [`ShellFamily`].
+/// 4. Platform default — [`ShellFamily::Ps`] on Windows, [`ShellFamily::Posix`]
+///    otherwise.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -323,12 +346,18 @@ fn shell_family_from_env(
 /// ```
 #[must_use]
 pub fn detect_shell_family() -> ShellFamily {
-    let ps_channel = std::env::var_os("POWERSHELL_DISTRIBUTION_CHANNEL").is_some();
-    let ps_module_nonwindows = !cfg!(windows) && std::env::var_os("PSModulePath").is_some();
+    if let Some(val) = std::env::var_os("RAKE_SHELL")
+        && let Some(s) = val.to_str().filter(|s| !s.is_empty())
+    {
+        return classify_shell(s);
+    }
+    let has_ps_signal = std::env::var_os("POWERSHELL_DISTRIBUTION_CHANNEL").is_some()
+        || (!cfg!(windows) && std::env::var_os("PSModulePath").is_some());
+    let fish_version = std::env::var_os("FISH_VERSION").is_some();
     let shell = std::env::var_os("SHELL");
     shell_family_from_env(
-        ps_channel,
-        ps_module_nonwindows,
+        has_ps_signal,
+        fish_version,
         shell.as_deref().and_then(|s| s.to_str()),
         cfg!(windows),
     )
@@ -416,41 +445,6 @@ pub struct Target {
     /// commands run.
     #[serde(default)]
     pub tools: Vec<String>,
-    /// The platforms this target applies to, as OS names (`linux`/`macos`/
-    /// `windows`/…) or family aliases (`unix`/`windows`). When set, the whole
-    /// target (and any dependency reachable *only* through it) is silently
-    /// pruned from the run when the host's OS *or* family does not match one of
-    /// these tokens. `None` (the default) means every platform. Validated at
-    /// parse time against the same allowlist as command-level `platform`. A
-    /// command inside a platform-scoped target must not also declare its own
-    /// `platform` — that is a syntax error ([`Error::CommandPlatformInPlatformTarget`]).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use librake::Rakefile;
-    ///
-    /// let toml = r#"
-    /// [target.sign]
-    /// platform = ["macos"]
-    ///
-    /// [[target.sign.command]]
-    /// name = "notarize"
-    /// cmd  = ["xcrun", "notarytool", "submit"]
-    /// "#;
-    ///
-    /// let rakefile = Rakefile::from_toml_str(toml)?;
-    /// assert_eq!(
-    ///     rakefile
-    ///         .target("sign")
-    ///         .and_then(|t| t.platform.as_deref())
-    ///         .map(|p| p.to_vec()),
-    ///     Some(vec!["macos".to_string()])
-    /// );
-    /// # Ok::<(), librake::Error>(())
-    /// ```
-    #[serde(default)]
-    pub platform: Option<Vec<String>>,
 }
 
 fn default_true() -> bool {
@@ -475,6 +469,15 @@ pub struct Rakefile {
     /// disable the check entirely.
     #[serde(default = "default_true")]
     update: bool,
+    /// Targets that exist only as platform-specific variants
+    /// (`[target.X.linux]`, etc.) and were excluded because no variant matched
+    /// the current host. Not a TOML field — populated by
+    /// [`from_toml_str_with_host`](Self::from_toml_str_with_host).
+    /// Carried through to graph validation to produce
+    /// [`Error::TargetNotAvailableOnPlatform`] instead of
+    /// [`Error::UnknownDependency`] when a required target is excluded.
+    #[serde(skip)]
+    excluded_targets: IndexMap<String, Vec<String>>,
 }
 
 /// The outcome of running a target: the exit status of the last command that
@@ -497,11 +500,22 @@ impl Rakefile {
     /// Returns [`Error::Io`] if `path` cannot be read, or any error from
     /// [`Rakefile::from_toml_str`] if the contents are invalid.
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
-        let contents = std::fs::read_to_string(path)?;
-        Self::from_toml_str(&contents)
+        Self::from_path_with_host(path, &Host::detect())
     }
 
-    /// Parse and validate a `Rakefile.toml` from a string.
+    /// Like [`from_path`](Self::from_path) but with an explicit [`Host`],
+    /// so callers and tests can pin which platform variant is selected at
+    /// parse time.
+    ///
+    /// # Errors
+    /// As [`from_path`](Self::from_path).
+    pub fn from_path_with_host(path: impl AsRef<Path>, host: &Host) -> Result<Self> {
+        let contents = std::fs::read_to_string(path)?;
+        Self::from_toml_str_with_host(&contents, host)
+    }
+
+    /// Parse and validate a `Rakefile.toml` from a string using the current
+    /// host's platform to resolve any platform-specific target variants.
     ///
     /// # Errors
     /// Returns [`Error::Parse`] if `s` is not valid TOML, or any of the
@@ -510,13 +524,16 @@ impl Rakefile {
     /// - [`Error::EmptyCmd`] — a `cmd` array with no program
     /// - [`Error::DuplicateCommand`] — two commands in one target share a `name`
     /// - [`Error::UnknownDependency`] / [`Error::CircularDependency`]
-    /// - [`Error::EmptyTargetPlatformList`] — a target's `platform` list is empty
-    /// - [`Error::InvalidTargetPlatform`] — a target's `platform` contains an
-    ///   unrecognized token
-    /// - [`Error::CommandPlatformInPlatformTarget`] — a command inside a
-    ///   platform-scoped target also declares its own `platform`
+    /// - [`Error::ConflictingDependency`] — a `depends_on` entry appears both
+    ///   with and without a `^` prefix
+    /// - [`Error::InvalidPlatformVariant`] — an unknown key in a target table
+    ///   (including the old `platform = [...]` field at the target level)
     /// - [`Error::InvalidPlatform`] / [`Error::InvalidArch`] /
     ///   [`Error::EmptyPlatformList`] — command-level platform/arch list errors
+    /// - [`Error::UnknownCommandTool`] — a command's `tools` entry has no
+    ///   matching tool definition
+    /// - [`Error::ToolDeclaredAtBothLevels`] — a tool name appears in both the
+    ///   target's and a command's `tools` list
     ///
     /// # Examples
     ///
@@ -534,41 +551,20 @@ impl Rakefile {
     /// # Ok::<(), librake::Error>(())
     /// ```
     ///
-    /// Target-level platform errors:
+    /// Platform variant syntax:
     ///
     /// ```
-    /// use librake::{Error, Rakefile};
+    /// use librake::{Error, Host, Rakefile};
     ///
-    /// // An empty platform list on a target is rejected at parse time.
-    /// let err = Rakefile::from_toml_str(r#"
-    /// [target.sign]
-    /// platform = []
-    /// [[target.sign.command]]
-    /// name = "n"
-    /// cmd  = ["true"]
-    /// "#);
-    /// assert!(matches!(err, Err(Error::EmptyTargetPlatformList { .. })));
-    ///
-    /// // An unrecognized token in a target's platform list is rejected.
-    /// let err = Rakefile::from_toml_str(r#"
-    /// [target.sign]
-    /// platform = ["macOs"]
-    /// [[target.sign.command]]
-    /// name = "n"
-    /// cmd  = ["true"]
-    /// "#);
-    /// assert!(matches!(err, Err(Error::InvalidTargetPlatform { .. })));
-    ///
-    /// // A command inside a platform-scoped target must not re-declare platform.
+    /// // An unknown key in a target table is rejected at parse time.
     /// let err = Rakefile::from_toml_str(r#"
     /// [target.sign]
     /// platform = ["macos"]
     /// [[target.sign.command]]
     /// name = "n"
-    /// platform = ["macos"]
     /// cmd  = ["true"]
     /// "#);
-    /// assert!(matches!(err, Err(Error::CommandPlatformInPlatformTarget { .. })));
+    /// assert!(matches!(err, Err(Error::InvalidPlatformVariant { .. })));
     ///
     /// // Command-level tools are parsed and validated at parse time.
     /// let toml = r#"
@@ -590,7 +586,76 @@ impl Rakefile {
     /// # Ok::<(), librake::Error>(())
     /// ```
     pub fn from_toml_str(s: &str) -> Result<Self> {
-        let mut rakefile: Rakefile = toml::from_str(s)?;
+        Self::from_toml_str_with_host(s, &Host::detect())
+    }
+
+    /// Like [`from_toml_str`](Self::from_toml_str) but with an explicit
+    /// [`Host`], so callers and tests can pin which platform variant is
+    /// selected at parse time. Particularly useful for tests that need to
+    /// simulate a specific host platform.
+    ///
+    /// # Errors
+    /// As [`from_toml_str`](Self::from_toml_str).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use librake::{Host, Rakefile};
+    ///
+    /// let toml = r#"
+    /// [target.sign.macos]
+    /// [[target.sign.macos.command]]
+    /// name = "notarize"
+    /// cmd  = ["xcrun", "notarytool", "submit"]
+    ///
+    /// [[target.sign.command]]
+    /// name = "noop"
+    /// cmd  = ["true"]
+    /// "#;
+    ///
+    /// let macos_host = Host { os: "macos", family: "unix", arch: "aarch64" };
+    /// let rakefile = Rakefile::from_toml_str_with_host(toml, &macos_host)?;
+    /// // On macOS the macos variant is selected.
+    /// assert_eq!(
+    ///     rakefile.target("sign").and_then(|t| t.commands.first()).map(|c| c.name.as_str()),
+    ///     Some("notarize")
+    /// );
+    ///
+    /// let linux_host = Host { os: "linux", family: "unix", arch: "x86_64" };
+    /// let rakefile = Rakefile::from_toml_str_with_host(toml, &linux_host)?;
+    /// // On Linux the base variant is selected.
+    /// assert_eq!(
+    ///     rakefile.target("sign").and_then(|t| t.commands.first()).map(|c| c.name.as_str()),
+    ///     Some("noop")
+    /// );
+    /// # Ok::<(), librake::Error>(())
+    /// ```
+    ///
+    /// A target that exists only as a platform-specific variant is excluded (not
+    /// an error) when no variant matches the current host — it simply does not
+    /// appear in [`targets()`](Self::targets):
+    ///
+    /// ```
+    /// use librake::{Host, Rakefile};
+    ///
+    /// let toml = r#"
+    /// [target.notarize.macos]
+    /// [[target.notarize.macos.command]]
+    /// name = "submit"
+    /// cmd  = ["xcrun", "notarytool", "submit"]
+    /// "#;
+    ///
+    /// let linux_host = Host { os: "linux", family: "unix", arch: "x86_64" };
+    /// let rakefile = Rakefile::from_toml_str_with_host(toml, &linux_host)?;
+    /// // The macOS-only target is excluded on Linux — not an error, just absent.
+    /// assert!(rakefile.target("notarize").is_none());
+    /// # Ok::<(), librake::Error>(())
+    /// ```
+    pub fn from_toml_str_with_host(s: &str, host: &Host) -> Result<Self> {
+        let raw: toml::Value = toml::from_str(s)?;
+        let (resolved, excluded) = resolve_platform_variants(raw, host)?;
+        let mut rakefile: Rakefile = Deserialize::deserialize(resolved)?;
+        rakefile.excluded_targets = excluded;
         rakefile.normalize_depends_on();
         rakefile.validate()?;
         Ok(rakefile)
@@ -633,23 +698,6 @@ impl Rakefile {
                     target: name.clone(),
                 });
             }
-            validate_target_platform(name, target)?;
-            // A command inside a platform-scoped target must not also declare
-            // its own `platform` — the target's list already scopes every
-            // command within it, so a command-level `platform` is redundant
-            // and flagged as a syntax error.
-            if let Some(target_platforms) = &target.platform {
-                let joined = target_platforms.join(", ");
-                for command in &target.commands {
-                    if command.platform.is_some() {
-                        return Err(Error::CommandPlatformInPlatformTarget {
-                            target: name.clone(),
-                            command: command.name.clone(),
-                            target_platforms: joined.clone(),
-                        });
-                    }
-                }
-            }
             let mut seen: HashSet<&str> = HashSet::new();
             for command in &target.commands {
                 validate_command(name, command)?;
@@ -661,7 +709,7 @@ impl Rakefile {
                 }
             }
         }
-        graph::validate(&self.targets)?;
+        graph::validate(&self.targets, &self.excluded_targets)?;
         tool::validate(&self.tools, &self.targets)
     }
 
@@ -767,6 +815,8 @@ impl Rakefile {
     ///
     /// # Errors
     /// Returns [`Error::UnknownTarget`] if any entry in `names` is not defined,
+    /// [`Error::TargetNotAvailableOnPlatform`] if a root or skip target exists
+    /// only as platform-specific variants that don't match the current host,
     /// [`Error::MissingShellVariant`] if a selected command has no variant for
     /// the detected shell, or [`Error::Spawn`] if a command's program cannot be
     /// launched.
@@ -866,7 +916,11 @@ impl Rakefile {
     /// pinned — the test seam for dry-run unit tests.
     ///
     /// # Errors
-    /// As [`run_dry`](Self::run_dry).
+    /// Returns [`Error::UnknownTarget`] for an unknown root or skip target,
+    /// [`Error::TargetNotAvailableOnPlatform`] when a root or skip target exists
+    /// only as platform-specific variants that don't match the pinned host, or
+    /// [`Error::MissingShellVariant`] when a command has no variant for the
+    /// pinned shell.
     ///
     /// # Examples
     ///
@@ -880,6 +934,26 @@ impl Rakefile {
     /// assert!(report.status.is_none());
     /// # Ok(())
     /// # }
+    /// ```
+    ///
+    /// Requesting a platform-only target on a non-matching host returns
+    /// [`Error::TargetNotAvailableOnPlatform`]:
+    ///
+    /// ```
+    /// use librake::{Error, Host, Rakefile, ShellFamily};
+    ///
+    /// let toml = r#"
+    /// [target.notarize.macos]
+    /// [[target.notarize.macos.command]]
+    /// name = "submit"
+    /// cmd  = ["xcrun", "notarytool", "submit"]
+    /// "#;
+    ///
+    /// let linux_host = Host { os: "linux", family: "unix", arch: "x86_64" };
+    /// let rakefile = Rakefile::from_toml_str_with_host(toml, &linux_host)?;
+    /// let err = rakefile.run_dry_with(&["notarize"], ShellFamily::Posix, linux_host);
+    /// assert!(matches!(err, Err(Error::TargetNotAvailableOnPlatform { .. })));
+    /// # Ok::<(), librake::Error>(())
     /// ```
     pub fn run_dry_with(
         &self,
@@ -903,25 +977,15 @@ impl Rakefile {
         if roots.is_empty() {
             roots.push(crate::DEFAULT_TARGET);
         }
-        // Targets with a `platform` list that does not match the host are
-        // silently pruned before any graph building. They vanish entirely (no
-        // `Skipped` announcement) and any dependency edge pointing to them is
-        // dropped without error — their dependents still run, just without
-        // waiting for the excluded target.
-        let auto_skips: HashSet<&str> = self
-            .targets
-            .iter()
-            .filter(|(_, t)| {
-                t.platform
-                    .as_ref()
-                    .is_some_and(|ps| !ps.iter().any(|p| p == host.os || p == host.family))
-            })
-            .map(|(n, _)| n.as_str())
-            .collect();
         // Resolve the order before the timer: a pre-execution error (an unknown
         // target, or a skip nothing else can do without) aborts without printing
         // a total `Runtime` line.
-        let plan = graph::execution_order_with_skips(&self.targets, &roots, &skips, &auto_skips)?;
+        let plan = graph::execution_order_with_skips(
+            &self.targets,
+            &self.excluded_targets,
+            &roots,
+            &skips,
+        )?;
         let cmd_name_width = plan
             .steps
             .iter()
@@ -948,7 +1012,30 @@ impl Rakefile {
             })
             .max()
             .unwrap_or(0);
-        let name_width = cmd_name_width.max(skip_name_width);
+        let tool_tag_width = plan
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Run(name) => self.targets.get(*name),
+                Step::Skip(_) => None,
+            })
+            .flat_map(|t| {
+                t.tools.iter().map(String::as_str).chain(
+                    t.commands
+                        .iter()
+                        .flat_map(|c| c.tools.iter().map(String::as_str)),
+                )
+            })
+            .map(|tool_name| {
+                if self.tools.fish.contains_key(tool_name) {
+                    "fish".len()
+                } else {
+                    "check".len()
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        let name_width = cmd_name_width.max(skip_name_width).max(tool_tag_width);
         let start = Instant::now();
         let result = self.run_steps(&plan.steps, family, &host, dry_run, name_width);
         let elapsed = start.elapsed();
@@ -1119,27 +1206,104 @@ fn validate_platform_gates(target: &str, command: &Command) -> Result<()> {
     Ok(())
 }
 
-/// Validate a target's top-level `platform` list: when declared it must be
-/// non-empty, and every token must be a recognized OS ([`KNOWN_OS`]) or family
-/// ([`KNOWN_FAMILY`]) name. An unset list is always valid.
-fn validate_target_platform(target: &str, t: &Target) -> Result<()> {
-    let Some(platforms) = &t.platform else {
-        return Ok(());
+/// Outcome of resolving a single `[target.X]` table during platform variant
+/// processing. Defined at module level to satisfy `clippy::items_after_statements`.
+enum Resolution {
+    UseVariant(toml::Value),
+    UseBase(toml::map::Map<String, toml::Value>),
+    Exclude,
+}
+
+/// Walk the `[target]` table in a parsed TOML value, resolve platform-specific
+/// sub-table variants for `host`, and return the modified value plus a map of
+/// targets that were excluded on this host (only defined for other platforms).
+///
+/// For each `[target.X]` entry the function distinguishes three kinds of keys:
+/// - **base keys** (`command`, `depends_on`, `tools`) — remain in the base target
+/// - **variant keys** (any token from [`KNOWN_OS`] or [`KNOWN_FAMILY`]) — declare
+///   a platform-specific override for that OS/family
+/// - **anything else** — rejected with [`Error::InvalidPlatformVariant`]
+///
+/// Resolution selects the most specific matching variant (OS before family);
+/// when no variant matches the base keys form the resolved target; when no base
+/// keys exist either the target is added to `excluded` and removed from the map.
+fn resolve_platform_variants(
+    mut raw: toml::Value,
+    host: &Host,
+) -> Result<(toml::Value, IndexMap<String, Vec<String>>)> {
+    let mut excluded: IndexMap<String, Vec<String>> = IndexMap::new();
+
+    let Some(target_map) = raw.get_mut("target").and_then(|v| v.as_table_mut()) else {
+        return Ok((raw, excluded));
     };
-    if platforms.is_empty() {
-        return Err(Error::EmptyTargetPlatformList {
-            target: target.to_string(),
-        });
-    }
-    for token in platforms {
-        if !KNOWN_OS.contains(&token.as_str()) && !KNOWN_FAMILY.contains(&token.as_str()) {
-            return Err(Error::InvalidTargetPlatform {
-                target: target.to_string(),
-                token: token.clone(),
-            });
+
+    let names: Vec<String> = target_map.keys().cloned().collect();
+
+    for name in &names {
+        let Some(value) = target_map.get(name) else {
+            continue;
+        };
+        let Some(table) = value.as_table() else {
+            continue;
+        };
+
+        // Validate and collect variant keys (KNOWN_OS ∪ KNOWN_FAMILY).
+        let mut variant_keys: Vec<String> = Vec::new();
+        for key in table.keys() {
+            if KNOWN_TARGET_BASE_KEYS.contains(&key.as_str()) {
+                // base field — fine
+            } else if KNOWN_OS.contains(&key.as_str()) || KNOWN_FAMILY.contains(&key.as_str()) {
+                variant_keys.push(key.clone());
+            } else {
+                return Err(Error::InvalidPlatformVariant {
+                    target: name.clone(),
+                    key: key.clone(),
+                });
+            }
+        }
+
+        if variant_keys.is_empty() {
+            continue; // plain base target — nothing to resolve
+        }
+
+        // OS token beats family token (more specific wins).
+        let matched = variant_keys
+            .iter()
+            .find(|k| k.as_str() == host.os)
+            .or_else(|| variant_keys.iter().find(|k| k.as_str() == host.family));
+
+        // Collect the resolution decision while the table borrow is live,
+        // then apply it after releasing the borrow.
+        let resolution = if let Some(variant_key) = matched {
+            Resolution::UseVariant(table[variant_key.as_str()].clone())
+        } else {
+            let base: toml::map::Map<String, toml::Value> = table
+                .iter()
+                .filter(|(k, _)| KNOWN_TARGET_BASE_KEYS.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if base.is_empty() {
+                Resolution::Exclude
+            } else {
+                Resolution::UseBase(base)
+            }
+        };
+
+        match resolution {
+            Resolution::UseVariant(v) => {
+                drop(target_map.insert(name.clone(), v));
+            }
+            Resolution::UseBase(base) => {
+                drop(target_map.insert(name.clone(), toml::Value::Table(base)));
+            }
+            Resolution::Exclude => {
+                drop(excluded.insert(name.clone(), variant_keys));
+                drop(target_map.remove(name.as_str()));
+            }
         }
     }
-    Ok(())
+
+    Ok((raw, excluded))
 }
 
 /// Run a target's commands in array order under shell `family`. Returns the last
@@ -1485,10 +1649,32 @@ pub fn print_total_runtime(elapsed: Duration) {
 mod tests {
     use std::time::Duration;
 
-    use super::{Rakefile, format_duration};
+    use super::{Host, Rakefile, format_duration};
     use crate::error::Error;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    // Platform-portable `cmd = [...]` fragments for embedding in TOML strings.
+    #[cfg(windows)]
+    const CMD_EXIT0: &str = r#"cmd = ["cmd", "/c", "exit", "0"]"#;
+    #[cfg(not(windows))]
+    const CMD_EXIT0: &str = r#"cmd = ["true"]"#;
+
+    #[cfg(windows)]
+    const CMD_EXIT1: &str = r#"cmd = ["cmd", "/c", "exit", "1"]"#;
+    #[cfg(not(windows))]
+    const CMD_EXIT1: &str = r#"cmd = ["false"]"#;
+
+    // Portable TOML array values for tool `check`/`install` fields.
+    #[cfg(windows)]
+    const TOML_EXIT0: &str = r#"["cmd", "/c", "exit", "0"]"#;
+    #[cfg(not(windows))]
+    const TOML_EXIT0: &str = r#"["true"]"#;
+
+    #[cfg(windows)]
+    const TOML_EXIT1: &str = r#"["cmd", "/c", "exit", "1"]"#;
+    #[cfg(not(windows))]
+    const TOML_EXIT1: &str = r#"["false"]"#;
 
     #[test]
     fn format_duration_promotes_units() {
@@ -1773,9 +1959,11 @@ cmd = ["cargo", "doc"]
 
     #[test]
     fn commands_run_in_array_order_stop_at_failure() -> TestResult {
-        let toml = "[[target.demo.command]]\nname = \"boom\"\ncmd = [\"false\"]\n\
-                    [[target.demo.command]]\nname = \"after\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+        let toml = format!(
+            "[[target.demo.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
+                    [[target.demo.command]]\nname = \"after\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         // The first command fails without `skip_on_error`, so execution stops
         // there and `after` never runs: the returned status is the failure.
         let status = rakefile.run(&["demo"])?.status.ok_or("expected a status")?;
@@ -1785,9 +1973,11 @@ cmd = ["cargo", "doc"]
 
     #[test]
     fn skip_on_error_continues_remaining_commands() -> TestResult {
-        let toml = "[[target.demo.command]]\nname = \"boom\"\ncmd = [\"false\"]\nskip_on_error = true\n\
-                    [[target.demo.command]]\nname = \"after\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+        let toml = format!(
+            "[[target.demo.command]]\nname = \"boom\"\n{CMD_EXIT1}\nskip_on_error = true\n\
+                    [[target.demo.command]]\nname = \"after\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         // `boom` fails but opts into skipping, so `after` still runs and its
         // success is the status returned.
         let status = rakefile.run(&["demo"])?.status.ok_or("expected a status")?;
@@ -1797,10 +1987,12 @@ cmd = ["cargo", "doc"]
 
     #[test]
     fn skip_on_error_continues_chain() -> TestResult {
-        let toml = "[[target.flaky.command]]\nname = \"boom\"\ncmd = [\"false\"]\nskip_on_error = true\n\
+        let toml = format!(
+            "[[target.flaky.command]]\nname = \"boom\"\n{CMD_EXIT1}\nskip_on_error = true\n\
                     [target.all]\ndepends_on = [\"flaky\"]\n\
-                    [[target.all.command]]\nname = \"ok\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+                    [[target.all.command]]\nname = \"ok\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         // `flaky` exits non-zero but opts into skipping, so `all` still runs and
         // its success is the status returned for the whole chain.
         let status = rakefile.run(&["all"])?.status.ok_or("expected a status")?;
@@ -1810,10 +2002,12 @@ cmd = ["cargo", "doc"]
 
     #[test]
     fn failing_dependency_without_skip_aborts() -> TestResult {
-        let toml = "[[target.flaky.command]]\nname = \"boom\"\ncmd = [\"false\"]\n\
+        let toml = format!(
+            "[[target.flaky.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
                     [target.all]\ndepends_on = [\"flaky\"]\n\
-                    [[target.all.command]]\nname = \"ok\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+                    [[target.all.command]]\nname = \"ok\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         // `flaky` fails and does not skip, so the chain stops there: `all` never
         // runs and the returned status reflects the failure.
         let status = rakefile.run(&["all"])?.status.ok_or("expected a status")?;
@@ -1823,10 +2017,12 @@ cmd = ["cargo", "doc"]
 
     #[test]
     fn depends_only_target_runs_dependencies() -> TestResult {
-        let toml = "[[target.build.command]]\nname = \"compile\"\ncmd = [\"true\"]\n\
-                    [[target.test.command]]\nname = \"check\"\ncmd = [\"true\"]\n\
-                    [target.all]\ndepends_on = [\"build\", \"test\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+        let toml = format!(
+            "[[target.build.command]]\nname = \"compile\"\n{CMD_EXIT0}\n\
+                    [[target.test.command]]\nname = \"check\"\n{CMD_EXIT0}\n\
+                    [target.all]\ndepends_on = [\"build\", \"test\"]\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         // `all` has no command of its own; its status is that of the last
         // dependency to run.
         let status = rakefile.run(&["all"])?.status.ok_or("expected a status")?;
@@ -1837,9 +2033,11 @@ cmd = ["cargo", "doc"]
     #[test]
     fn multiple_root_targets_run_in_one_call() -> TestResult {
         // Two independent roots given together both run; the run succeeds.
-        let toml = "[[target.one.command]]\nname = \"a\"\ncmd = [\"true\"]\n\
-                    [[target.two.command]]\nname = \"b\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+        let toml = format!(
+            "[[target.one.command]]\nname = \"a\"\n{CMD_EXIT0}\n\
+                    [[target.two.command]]\nname = \"b\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["one", "two"])?
             .status
@@ -1852,12 +2050,14 @@ cmd = ["cargo", "doc"]
     fn shared_dependency_of_two_roots_stops_run_once() -> TestResult {
         // Both roots depend on `flaky`, which fails without `skip_on_error`.
         // The shared dep runs once and aborts the whole merged chain.
-        let toml = "[[target.flaky.command]]\nname = \"boom\"\ncmd = [\"false\"]\n\
+        let toml = format!(
+            "[[target.flaky.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
                     [target.one]\ndepends_on = [\"flaky\"]\n\
-                    [[target.one.command]]\nname = \"a\"\ncmd = [\"true\"]\n\
+                    [[target.one.command]]\nname = \"a\"\n{CMD_EXIT0}\n\
                     [target.two]\ndepends_on = [\"flaky\"]\n\
-                    [[target.two.command]]\nname = \"b\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+                    [[target.two.command]]\nname = \"b\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["one", "two"])?
             .status
@@ -1870,10 +2070,12 @@ cmd = ["cargo", "doc"]
     fn run_with_present_tool_succeeds() -> TestResult {
         // The tool's `check` (`true`) reports it present, so `install` (`false`,
         // which would fail) never runs and the target's command still runs.
-        let toml = "[tool.cargo.t]\ncheck = [\"true\"]\ninstall = [\"false\"]\n\
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
                     [target.build]\ntools = [\"t\"]\n\
-                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["build"])?
             .status
@@ -1884,12 +2086,14 @@ cmd = ["cargo", "doc"]
 
     #[test]
     fn run_with_failing_tool_install_aborts() -> TestResult {
-        // The tool is absent (`check` is `false`) and its `install` fails, so the
+        // The tool is absent (`check` fails) and its `install` fails, so the
         // run errors before the target's command runs.
-        let toml = "[tool.cargo.t]\ncheck = [\"false\"]\ninstall = [\"false\"]\n\
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT1}\ninstall = {TOML_EXIT1}\n\
                     [target.build]\ntools = [\"t\"]\n\
-                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         match rakefile.run(&["build"]) {
             Err(Error::ToolInstallFailed { tool, .. }) => {
                 assert_eq!(tool, "t");
@@ -1904,12 +2108,14 @@ cmd = ["cargo", "doc"]
         // Both `build` and its dependency `dep` reference the same present tool;
         // ensuring is deduped, so the run completes (and `install`, `false`,
         // never runs even though two targets reference the tool).
-        let toml = "[tool.cargo.t]\ncheck = [\"true\"]\ninstall = [\"false\"]\n\
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
                     [target.dep]\ntools = [\"t\"]\n\
-                    [[target.dep.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+                    [[target.dep.command]]\nname = \"c\"\n{CMD_EXIT0}\n\
                     [target.build]\ntools = [\"t\"]\ndepends_on = [\"dep\"]\n\
-                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["build"])?
             .status
@@ -1922,9 +2128,11 @@ cmd = ["cargo", "doc"]
     fn command_tool_is_ensured_when_command_runs() -> TestResult {
         // The command-level tool's `check` (`true`) reports it present, so
         // `install` (`false`, which would fail) never runs.
-        let toml = "[tool.cargo.t]\ncheck = [\"true\"]\ninstall = [\"false\"]\n\
-                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\ntools = [\"t\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\ntools = [\"t\"]\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["build"])?
             .status
@@ -1960,10 +2168,12 @@ cmd = ["cargo", "doc"]
         // Two commands in the same target both reference the same present tool;
         // the dedup set ensures it is checked at most once (`install = ["false"]`
         // must not fire).
-        let toml = "[tool.cargo.t]\ncheck = [\"true\"]\ninstall = [\"false\"]\n\
-                    [[target.build.command]]\nname = \"a\"\ncmd = [\"true\"]\ntools = [\"t\"]\n\
-                    [[target.build.command]]\nname = \"b\"\ncmd = [\"true\"]\ntools = [\"t\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT0}\ninstall = {TOML_EXIT1}\n\
+                    [[target.build.command]]\nname = \"a\"\n{CMD_EXIT0}\ntools = [\"t\"]\n\
+                    [[target.build.command]]\nname = \"b\"\n{CMD_EXIT0}\ntools = [\"t\"]\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         let status = rakefile
             .run(&["build"])?
             .status
@@ -1987,17 +2197,27 @@ cmd = ["cargo", "doc"]
     #[test]
     fn shell_family_from_env_precedence() {
         use super::{ShellFamily, shell_family_from_env};
-        // A PowerShell env channel wins over `$SHELL` (PowerShell never sets it).
+        // A PowerShell env signal wins over everything (PowerShell never sets $SHELL).
         assert_eq!(
             shell_family_from_env(true, false, Some("/usr/bin/fish"), false),
             ShellFamily::Ps
         );
-        // `PSModulePath` selects PowerShell only on non-Windows.
+        // PS wins even when FISH_VERSION is also set.
         assert_eq!(
-            shell_family_from_env(false, true, Some("/bin/bash"), false),
+            shell_family_from_env(true, true, Some("/bin/bash"), false),
             ShellFamily::Ps
         );
-        // Otherwise `$SHELL`'s basename classifies the family.
+        // FISH_VERSION wins over $SHELL — the Omarchy scenario: login=bash, running=fish.
+        assert_eq!(
+            shell_family_from_env(false, true, Some("/usr/bin/bash"), false),
+            ShellFamily::Fish
+        );
+        // FISH_VERSION wins even when $SHELL is unset.
+        assert_eq!(
+            shell_family_from_env(false, true, None, false),
+            ShellFamily::Fish
+        );
+        // Without FISH_VERSION, $SHELL basename classifies the family.
         assert_eq!(
             shell_family_from_env(false, false, Some("/usr/bin/fish"), false),
             ShellFamily::Fish
@@ -2006,7 +2226,7 @@ cmd = ["cargo", "doc"]
             shell_family_from_env(false, false, Some("/bin/zsh"), false),
             ShellFamily::Posix
         );
-        // Unset `$SHELL` falls back to the platform default.
+        // Unset $SHELL falls back to the platform default.
         assert_eq!(
             shell_family_from_env(false, false, None, true),
             ShellFamily::Ps
@@ -2015,7 +2235,7 @@ cmd = ["cargo", "doc"]
             shell_family_from_env(false, false, None, false),
             ShellFamily::Posix
         );
-        // An empty `$SHELL` is treated as unset.
+        // An empty $SHELL is treated as unset.
         assert_eq!(
             shell_family_from_env(false, false, Some(""), false),
             ShellFamily::Posix
@@ -2103,6 +2323,9 @@ cmd = ["cargo", "doc"]
     #[test]
     fn sh_variant_expands_and_runs() -> TestResult {
         use super::ShellFamily;
+        if cfg!(windows) {
+            return Ok(());
+        }
         // `$(...)` only expands through a shell; `sh -c` runs this and `test`
         // exits 0 when the substitution worked.
         let toml =
@@ -2119,6 +2342,9 @@ cmd = ["cargo", "doc"]
     #[test]
     fn sh_variant_failure_propagates() -> TestResult {
         use super::ShellFamily;
+        if cfg!(windows) {
+            return Ok(());
+        }
         let toml = "[[target.go.command]]\nname = \"boom\"\nsh = \"exit 3\"\n";
         let rakefile = Rakefile::from_toml_str(toml)?;
         let status = rakefile
@@ -2275,9 +2501,11 @@ cmd = ["cargo", "doc"]
         use super::{Host, ShellFamily};
         // The first command is gated to windows (skipped on this linux host); the
         // second still runs, so the run reports its success.
-        let toml = "[[target.go.command]]\nname = \"win only\"\nplatform = [\"windows\"]\ncmd = [\"false\"]\n\
-                    [[target.go.command]]\nname = \"always\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+        let toml = format!(
+            "[[target.go.command]]\nname = \"win only\"\nplatform = [\"windows\"]\n{CMD_EXIT1}\n\
+                    [[target.go.command]]\nname = \"always\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         let host = Host {
             os: "linux",
             family: "unix",
@@ -2296,10 +2524,12 @@ cmd = ["cargo", "doc"]
         use super::{Host, ShellFamily};
         // `clean` would fail if it ran; skipping it via `^clean` lets `all`
         // (which still runs `build`) succeed.
-        let toml = "[[target.clean.command]]\nname = \"boom\"\ncmd = [\"false\"]\n\
-                    [[target.build.command]]\nname = \"ok\"\ncmd = [\"true\"]\n\
-                    [target.all]\ndepends_on = [\"clean\", \"build\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+        let toml = format!(
+            "[[target.clean.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
+                    [[target.build.command]]\nname = \"ok\"\n{CMD_EXIT0}\n\
+                    [target.all]\ndepends_on = [\"clean\", \"build\"]\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         let host = Host {
             os: "linux",
             family: "unix",
@@ -2340,6 +2570,9 @@ cmd = ["cargo", "doc"]
     #[test]
     fn matching_command_runs() -> TestResult {
         use super::{Host, ShellFamily};
+        if cfg!(windows) {
+            return Ok(());
+        }
         // Gated to the host's platform, so it runs and its non-zero exit shows.
         let toml =
             "[[target.go.command]]\nname = \"boom\"\nplatform = [\"linux\"]\nsh = \"exit 3\"\n";
@@ -2414,13 +2647,15 @@ cmd = ["cargo", "doc"]
         use super::{Host, ShellFamily};
         // `clean` would fail if it ran; `ci`'s depends_on `^clean` prunes it
         // automatically without a CLI `^clean` token.
-        let toml = "[[target.clean.command]]\nname = \"boom\"\ncmd = [\"false\"]\n\
-             [[target.build.command]]\nname = \"ok\"\ncmd = [\"true\"]\n\
+        let toml = format!(
+            "[[target.clean.command]]\nname = \"boom\"\n{CMD_EXIT1}\n\
+             [[target.build.command]]\nname = \"ok\"\n{CMD_EXIT0}\n\
              [target.all]\ndepends_on = [\"clean\", \"build\"]\n\
-             [[target.all.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+             [[target.all.command]]\nname = \"c\"\n{CMD_EXIT0}\n\
              [target.ci]\ndepends_on = [\"all\", \"^clean\"]\n\
-             [[target.ci.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
+             [[target.ci.command]]\nname = \"c\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
         let host = Host {
             os: "linux",
             family: "unix",
@@ -2476,160 +2711,210 @@ cmd = ["cargo", "doc"]
         Ok(())
     }
 
-    // ── Target-level platform tests ──────────────────────────────────────────
+    // ── Target-level platform variant tests ─────────────────────────────────
 
-    #[test]
-    fn target_platform_empty_list_rejected() -> TestResult {
-        let toml = "[target.build]\nplatform = []\n\
-                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        match Rakefile::from_toml_str(toml) {
-            Err(Error::EmptyTargetPlatformList { target }) => {
-                assert_eq!(target, "build");
-                Ok(())
-            }
-            other => Err(format!("expected EmptyTargetPlatformList, got {other:?}").into()),
+    fn linux_host() -> Host {
+        Host {
+            os: "linux",
+            family: "unix",
+            arch: "x86_64",
+        }
+    }
+
+    fn macos_host() -> Host {
+        Host {
+            os: "macos",
+            family: "unix",
+            arch: "aarch64",
         }
     }
 
     #[test]
-    fn target_platform_invalid_token_rejected() -> TestResult {
-        let toml = "[target.build]\nplatform = [\"linx\"]\n\
-                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        match Rakefile::from_toml_str(toml) {
-            Err(Error::InvalidTargetPlatform { target, token }) => {
-                assert_eq!(target, "build");
-                assert_eq!(token, "linx");
+    fn platform_variant_os_resolves_on_matching_host() -> TestResult {
+        // [target.foo.linux] is selected on a linux host.
+        let toml = "[[target.foo.linux.command]]\nname = \"l\"\ncmd = [\"echo\",\"linux\"]\n\
+                    [[target.foo.command]]\nname = \"d\"\ncmd = [\"echo\",\"default\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &linux_host())?;
+        let cmds: Vec<&str> = rf
+            .target("foo")
+            .ok_or("expected 'foo'")?
+            .commands
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(cmds, vec!["l"]);
+        Ok(())
+    }
+
+    #[test]
+    fn platform_variant_base_used_when_no_match() -> TestResult {
+        // No macos variant exists; the base is used on macOS.
+        let toml = "[[target.foo.linux.command]]\nname = \"l\"\ncmd = [\"echo\",\"linux\"]\n\
+                    [[target.foo.command]]\nname = \"d\"\ncmd = [\"echo\",\"default\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &macos_host())?;
+        let cmds: Vec<&str> = rf
+            .target("foo")
+            .ok_or("expected 'foo'")?
+            .commands
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(cmds, vec!["d"]);
+        Ok(())
+    }
+
+    #[test]
+    fn platform_variant_family_token_matches_host() -> TestResult {
+        // [target.foo.unix] matches a linux host (family = "unix").
+        let toml = "[[target.foo.unix.command]]\nname = \"u\"\ncmd = [\"echo\",\"unix\"]\n\
+                    [[target.foo.command]]\nname = \"d\"\ncmd = [\"echo\",\"default\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &linux_host())?;
+        let cmds: Vec<&str> = rf
+            .target("foo")
+            .ok_or("expected 'foo'")?
+            .commands
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(cmds, vec!["u"]);
+        Ok(())
+    }
+
+    #[test]
+    fn platform_variant_os_beats_family() -> TestResult {
+        // Both linux and unix variants exist; linux is more specific and wins.
+        let toml = "[[target.foo.linux.command]]\nname = \"l\"\ncmd = [\"echo\",\"linux\"]\n\
+                    [[target.foo.unix.command]]\nname = \"u\"\ncmd = [\"echo\",\"unix\"]\n\
+                    [[target.foo.command]]\nname = \"d\"\ncmd = [\"echo\",\"default\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &linux_host())?;
+        let cmds: Vec<&str> = rf
+            .target("foo")
+            .ok_or("expected 'foo'")?
+            .commands
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(cmds, vec!["l"]);
+        Ok(())
+    }
+
+    #[test]
+    fn platform_variant_only_excluded_absent_from_targets() -> TestResult {
+        // foo has only a linux variant; on macOS it is absent from the resolved map.
+        let toml = "[[target.foo.linux.command]]\nname = \"l\"\ncmd = [\"echo\",\"linux\"]\n\
+                    [[target.bar.command]]\nname = \"b\"\ncmd = [\"true\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &macos_host())?;
+        assert!(rf.target("foo").is_none(), "foo should be absent on macOS");
+        assert!(rf.target("bar").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn platform_variant_excluded_dependency_is_silently_pruned() -> TestResult {
+        // bar depends on foo, which only has a linux variant.  On macOS parsing
+        // succeeds — excluded deps are accepted at parse time and simply absent
+        // from the resolved target map; build_order prunes them during execution.
+        let toml = "[[target.foo.linux.command]]\nname = \"l\"\ncmd = [\"echo\",\"linux\"]\n\
+                    [target.bar]\ndepends_on = [\"foo\"]\n\
+                    [[target.bar.command]]\nname = \"b\"\ncmd = [\"true\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &macos_host())?;
+        assert!(rf.target("foo").is_none(), "foo should be absent on macOS");
+        assert!(rf.target("bar").is_some(), "bar should still be present");
+        Ok(())
+    }
+
+    #[test]
+    fn platform_variant_running_excluded_target_directly_errors() -> TestResult {
+        use super::ShellFamily;
+        // Requesting an excluded target as a root gives a clear error.
+        let toml = "[[target.foo.linux.command]]\nname = \"l\"\ncmd = [\"echo\",\"linux\"]\n\
+                    [[target.bar.command]]\nname = \"b\"\ncmd = [\"true\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &macos_host())?;
+        match rf.run_with(&["foo"], ShellFamily::Posix, macos_host()) {
+            Err(Error::TargetNotAvailableOnPlatform { name, .. }) => {
+                assert_eq!(name, "foo");
                 Ok(())
             }
-            other => Err(format!("expected InvalidTargetPlatform, got {other:?}").into()),
+            other => Err(format!("expected TargetNotAvailableOnPlatform, got {other:?}").into()),
         }
     }
 
     #[test]
-    fn command_platform_in_platform_target_rejected() -> TestResult {
+    fn platform_variant_unknown_key_rejected() -> TestResult {
+        // The old `platform = [...]` field is now invalid; it's caught as an unknown key.
         let toml = "[target.build]\nplatform = [\"linux\"]\n\
-                    [[target.build.command]]\nname = \"c\"\nplatform = [\"linux\"]\ncmd = [\"true\"]\n";
+                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
         match Rakefile::from_toml_str(toml) {
-            Err(Error::CommandPlatformInPlatformTarget {
-                target,
-                command,
-                target_platforms,
-            }) => {
+            Err(Error::InvalidPlatformVariant { target, key }) => {
                 assert_eq!(target, "build");
-                assert_eq!(command, "c");
-                assert_eq!(target_platforms, "linux");
+                assert_eq!(key, "platform");
                 Ok(())
             }
-            other => Err(format!("expected CommandPlatformInPlatformTarget, got {other:?}").into()),
+            other => Err(format!("expected InvalidPlatformVariant, got {other:?}").into()),
         }
     }
 
     #[test]
-    fn target_platform_family_token_is_accepted() -> TestResult {
-        let toml = "[target.build]\nplatform = [\"unix\"]\n\
-                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        // "unix" is a valid family token — must parse without error.
-        let rakefile = Rakefile::from_toml_str(toml)?;
-        let t = rakefile.target("build").ok_or("expected 'build'")?;
-        assert_eq!(t.platform.as_deref(), Some(["unix".to_string()].as_slice()));
+    fn platform_variant_typo_key_rejected() -> TestResult {
+        // A typo in the platform variant key (linuX) is rejected.
+        let toml = "[[target.foo.linuX.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        match Rakefile::from_toml_str(toml) {
+            Err(Error::InvalidPlatformVariant { target, key }) => {
+                assert_eq!(target, "foo");
+                assert_eq!(key, "linuX");
+                Ok(())
+            }
+            other => Err(format!("expected InvalidPlatformVariant, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn platform_variant_base_without_variants_unchanged() -> TestResult {
+        // A plain [target.foo] with no variant sub-tables is unaffected.
+        let toml = "[[target.foo.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &linux_host())?;
+        assert!(rf.target("foo").is_some());
         Ok(())
     }
 
     #[test]
-    fn target_platform_filters_non_matching_host() -> TestResult {
-        use super::{Host, ShellFamily};
-        // `mac` is platform=["macos"]; the host is linux. `mac` must be
-        // silently pruned — never run, no status, but also no error.
-        let toml = "[target.mac]\nplatform = [\"macos\"]\n\
-                    [[target.mac.command]]\nname = \"c\"\ncmd = [\"false\"]\n\
-                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
-        let host = Host {
-            os: "linux",
-            family: "unix",
+    fn platform_variant_explicit_empty_header_excluded_on_non_matching() -> TestResult {
+        // Reproduces the Rakefile.toml linux-only pattern: an explicit empty
+        // [target.X.linux] header (no key-value pairs) followed by a
+        // [[target.X.linux.command]] array. On a non-linux host the target must
+        // be excluded (not appear as an EmptyTarget in self.targets).
+        let toml = "[target.linux-only.linux]\n\n\
+                    [[target.linux-only.linux.command]]\n\
+                    name = \"uname\"\n\
+                    cmd  = [\"uname\", \"-r\"]\n";
+        let windows_host = Host {
+            os: "windows",
+            family: "windows",
             arch: "x86_64",
         };
-        // Running `mac` on a linux host is a no-op (silently excluded).
-        let report = rakefile.run_dry_with(&["mac"], ShellFamily::Posix, host)?;
-        assert!(report.status.is_none());
-        // Running `build` still works.
-        let report = rakefile.run_dry_with(&["build"], ShellFamily::Posix, host)?;
-        assert!(report.status.is_none());
+        let rf = Rakefile::from_toml_str_with_host(toml, &windows_host)?;
+        assert!(
+            rf.target("linux-only").is_none(),
+            "linux-only must be absent on windows"
+        );
         Ok(())
     }
 
     #[test]
-    fn target_platform_matching_host_runs() -> TestResult {
-        use super::{Host, ShellFamily};
-        // `linux-only` is platform=["linux"] and the host is linux: it runs.
-        let toml = "[target.linux-only]\nplatform = [\"linux\"]\n\
-                    [[target.linux-only.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
-        let host = Host {
-            os: "linux",
-            family: "unix",
-            arch: "x86_64",
-        };
-        let status = rakefile
-            .run_with(&["linux-only"], ShellFamily::Posix, host)?
-            .status
-            .ok_or("expected a status")?;
-        assert!(status.success());
-        Ok(())
-    }
-
-    #[test]
-    fn target_platform_dependency_silently_dropped() -> TestResult {
-        use super::{Host, ShellFamily};
-        // `all` depends on `mac-only` (platform=["macos"]) and `build`. On a
-        // linux host `mac-only` is auto-pruned; `build` still runs.
-        let toml = "[target.mac-only]\nplatform = [\"macos\"]\n\
-                    [[target.mac-only.command]]\nname = \"c\"\ncmd = [\"false\"]\n\
-                    [[target.build.command]]\nname = \"ok\"\ncmd = [\"true\"]\n\
-                    [target.all]\ndepends_on = [\"mac-only\", \"build\"]\n\
-                    [[target.all.command]]\nname = \"a\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
-        let host = Host {
-            os: "linux",
-            family: "unix",
-            arch: "x86_64",
-        };
-        let status = rakefile
-            .run_with(&["all"], ShellFamily::Posix, host)?
-            .status
-            .ok_or("expected a status")?;
-        assert!(status.success());
-        Ok(())
-    }
-
-    #[test]
-    fn target_platform_family_token_matches_host() -> TestResult {
-        use super::{Host, ShellFamily};
-        // `platform = ["unix"]` matches a linux host (family = "unix").
-        let toml = "[target.unix-only]\nplatform = [\"unix\"]\n\
-                    [[target.unix-only.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
-        let host = Host {
-            os: "linux",
-            family: "unix",
-            arch: "x86_64",
-        };
-        let status = rakefile
-            .run_with(&["unix-only"], ShellFamily::Posix, host)?
-            .status
-            .ok_or("expected a status")?;
-        assert!(status.success());
-        Ok(())
-    }
-
-    #[test]
-    fn target_platform_in_list_output() -> TestResult {
-        use crate::list_targets;
-        let toml = "[target.build]\nplatform = [\"linux\", \"macos\"]\n\
-                    [[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
-        let rakefile = Rakefile::from_toml_str(toml)?;
-        let out = list_targets(&rakefile);
-        assert!(out.contains("    platform: linux, macos"), "output: {out}");
+    fn platform_variant_depends_on_resolved_correctly() -> TestResult {
+        // The linux variant has different depends_on than the base.
+        let toml = "[target.foo.linux]\ndepends_on = [\"dep-linux\"]\n\
+                    [[target.foo.linux.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+                    [target.foo]\ndepends_on = [\"dep-base\"]\n\
+                    [[target.foo.command]]\nname = \"c\"\ncmd = [\"true\"]\n\
+                    [[target.dep-linux.command]]\nname = \"d\"\ncmd = [\"true\"]\n\
+                    [[target.dep-base.command]]\nname = \"d\"\ncmd = [\"true\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &linux_host())?;
+        let foo = rf.target("foo").ok_or("expected 'foo'")?;
+        assert_eq!(foo.depends_on, vec!["dep-linux".to_string()]);
+        let rf2 = Rakefile::from_toml_str_with_host(toml, &macos_host())?;
+        let foo2 = rf2.target("foo").ok_or("expected 'foo'")?;
+        assert_eq!(foo2.depends_on, vec!["dep-base".to_string()]);
         Ok(())
     }
 }

@@ -11,7 +11,10 @@
 //! [`ToolTable`]). Targets are parsed and validated by [`Rakefile`] and run in
 //! dependency order via [`Rakefile::run`] (or previewed without execution via
 //! [`Rakefile::run_dry`]); commands run in array order after referenced tools
-//! have been ensured.
+//! have been ensured. The optional top-level `update` key (default `true`)
+//! controls whether `cargo-rake` checks crates.io for a newer version of itself
+//! on startup and installs it automatically; see [`ensure_self_update`] and
+//! [`Rakefile::update`].
 
 //! librake
 
@@ -293,11 +296,12 @@ pub fn exit_code(status: ExitStatus) -> i32 {
     }
 }
 
-/// Render the targets of `rakefile` for display, in declaration order. For
-/// each target the output shows the target name; a `    platform: <tokens>`
-/// line when the target declares a top-level `platform`; `depends_on` and
-/// `tools` summaries; and each command's name and body (cmd or shell variants)
-/// with per-command `(platform: …)`/`(arch: …)`/`(tools: …)`/`(skip_on_error)` markers.
+/// Render the targets of `rakefile` for display, in declaration order.
+///
+/// Platform-specific variants are resolved at parse time, so only the matched
+/// variant's commands appear. For each target the output shows the target name;
+/// `depends_on` and `tools` summaries; and each command's name and body (cmd or
+/// shell variants) with per-command `(platform: …)`/`(arch: …)`/`(tools: …)`/`(skip_on_error)` markers.
 ///
 /// # Examples
 ///
@@ -313,15 +317,13 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 /// # Ok::<(), librake::Error>(())
 /// ```
 ///
-/// A platform-scoped target includes a `    platform:` line in the output:
+/// Platform-specific variants are resolved at parse time; only the matching
+/// variant (or base) appears in the output:
 ///
 /// ```
 /// use librake::{Rakefile, list_targets};
 ///
 /// let toml = r#"
-/// [target.sign]
-/// platform = ["macos"]
-///
 /// [[target.sign.command]]
 /// name = "notarize"
 /// cmd  = ["xcrun", "notarytool", "submit"]
@@ -329,7 +331,8 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 ///
 /// let rakefile = Rakefile::from_toml_str(toml)?;
 /// let out = list_targets(&rakefile);
-/// assert!(out.contains("sign\n    platform: macos\n"), "got: {out}");
+/// assert!(out.contains("sign"), "got: {out}");
+/// assert!(out.contains("notarize"), "got: {out}");
 /// # Ok::<(), librake::Error>(())
 /// ```
 ///
@@ -363,9 +366,6 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
 
     for (name, target) in rakefile.targets() {
         let _ = writeln!(out, "{name}");
-        if let Some(platforms) = &target.platform {
-            let _ = writeln!(out, "    platform: {}", platforms.join(", "));
-        }
         if !target.depends_on.is_empty() || !target.skip_deps.is_empty() {
             let all: Vec<String> = target
                 .depends_on

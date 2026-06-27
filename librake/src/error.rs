@@ -116,40 +116,34 @@ pub enum Error {
         /// Which gating key was empty: `platform` or `arch`.
         key: &'static str,
     },
-    /// A target's top-level `platform` list named an unrecognized token (likely
-    /// a typo). Validated at parse time so the error is surfaced before any
-    /// execution occurs.
+    /// A `[target.X.KEY]` table key that is neither a known base field
+    /// (`command`/`depends_on`/`tools`) nor a recognized platform/family token.
+    /// The old `platform = [...]` field at the target level has been replaced by
+    /// platform-keyed sub-tables (e.g. `[target.X.linux]`).
     #[error(
-        "target '{target}' has invalid platform '{token}' (valid: an OS like linux, macos, windows, freebsd, \u{2026} or a family like unix, windows)"
+        "target '{target}' has unknown table key '{key}' \
+         (use a platform token like linux, macos, windows, freebsd, unix, \u{2026} \
+         for a platform variant, or 'depends_on', 'tools', 'command' for the base target; \
+         the old 'platform' field has been replaced by platform-keyed sub-tables, \
+         e.g. [target.{target}.linux])"
     )]
-    InvalidTargetPlatform {
+    InvalidPlatformVariant {
         /// The offending target name.
         target: String,
-        /// The unrecognized platform token.
-        token: String,
+        /// The unknown key.
+        key: String,
     },
-    /// A target's top-level `platform` list was declared but is empty, which
-    /// would exclude the target on every host.
+    /// The target exists in the Rakefile but only as platform-specific variants
+    /// (`[target.X.linux]`, etc.) and none of them match the current host.
     #[error(
-        "target '{target}' has an empty 'platform' list (omit it to run everywhere, or list at least one token)"
+        "target '{name}' is not available on the current platform; \
+         it is only defined for: {}", .available_on.join(", ")
     )]
-    EmptyTargetPlatformList {
-        /// The offending target name.
-        target: String,
-    },
-    /// A command inside a platform-scoped target also declares its own
-    /// `platform`, which is redundant and therefore a syntax error — the
-    /// target's platform already scopes every command within it.
-    #[error(
-        "target '{target}' command '{command}' declares 'platform' but the target is already restricted to '{target_platforms}' \u{2014} remove 'platform' from the command"
-    )]
-    CommandPlatformInPlatformTarget {
-        /// The platform-scoped target.
-        target: String,
-        /// The offending command's name.
-        command: String,
-        /// The target's platform list, comma-joined, shown in the error.
-        target_platforms: String,
+    TargetNotAvailableOnPlatform {
+        /// The target name.
+        name: String,
+        /// The platform tokens for which a variant is defined.
+        available_on: Vec<String>,
     },
     /// A target declared two commands with the same `name`.
     #[error(
@@ -314,6 +308,13 @@ pub enum Error {
         /// The name declared in both categories.
         tool: String,
     },
+    /// The running binary could not be renamed before a self-update install.
+    ///
+    /// On Windows, `cargo install` cannot overwrite a running executable, so the
+    /// binary is renamed to `<exe>.bak` first. This error fires when that rename
+    /// fails.
+    #[error("failed to prepare binary for self-update: {0}")]
+    SelfUpdatePrepare(io::Error),
     /// A Rust toolchain (cargo) is required to run targets but none is available
     /// — it was not found and installation was declined, impossible (no
     /// interactive terminal), or did not make cargo available.

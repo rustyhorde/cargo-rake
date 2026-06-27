@@ -2940,4 +2940,29 @@ cmd = ["cargo", "doc"]
         assert_eq!(foo2.depends_on, vec!["dep-base".to_string()]);
         Ok(())
     }
+
+    // --- plan_name_width tests ---
+
+    #[test]
+    fn plan_name_width_unknown_target_is_error() -> TestResult {
+        let toml = "[[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        match rakefile.plan_name_width(&["ghost"]) {
+            Err(Error::UnknownTarget { name }) => {
+                assert_eq!(name, "ghost");
+                Ok(())
+            }
+            other => Err(format!("expected UnknownTarget, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn plan_name_width_returns_command_name_length() -> TestResult {
+        let toml =
+            "[[target.default.command]]\nname = \"my-build\"\n".to_string() + CMD_EXIT0 + "\n";
+        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let width = rakefile.plan_name_width(&["default"])?;
+        assert_eq!(width, "my-build".len());
+        Ok(())
+    }
 }

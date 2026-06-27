@@ -1254,4 +1254,103 @@ cmd = ["cargo", "matrix", "build"]
             other => Err(format!("expected RequiredToolMissing, got {other:?}").into()),
         }
     }
+
+    // --- tag_for tests ---
+
+    #[test]
+    fn tag_for_fish_tool_returns_fish_tag() -> TestResult {
+        let toml = "[tool.fish.my_fn]\n\
+                    [[target.default.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        assert_eq!(rakefile.tools().tag_for("my_fn"), Some(super::FISH_TAG));
+        Ok(())
+    }
+
+    #[test]
+    fn tag_for_cargo_tool_returns_check_tag() -> TestResult {
+        let toml = "[tool.cargo.matrix]\ncheck = [\"matrix\", \"--version\"]\n\
+                    install = [\"cargo\", \"install\", \"matrix\"]\n\
+                    [[target.default.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        assert_eq!(rakefile.tools().tag_for("matrix"), Some(super::CHECK_TAG));
+        Ok(())
+    }
+
+    #[test]
+    fn tag_for_os_tool_returns_check_tag() -> TestResult {
+        let toml = "[tool.os.docker]\ncheck = [\"docker\", \"--version\"]\n\
+                    [[target.default.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        assert_eq!(rakefile.tools().tag_for("docker"), Some(super::CHECK_TAG));
+        Ok(())
+    }
+
+    #[test]
+    fn tag_for_unknown_returns_none() -> TestResult {
+        let toml = "[[target.default.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        assert_eq!(rakefile.tools().tag_for("nonexistent"), None);
+        Ok(())
+    }
+
+    // --- max_tag_width tests ---
+
+    #[test]
+    fn max_tag_width_empty_is_zero() {
+        assert_eq!(ToolTable::default().max_tag_width(), 0);
+    }
+
+    #[test]
+    fn max_tag_width_cargo_only() -> TestResult {
+        let toml = "[tool.cargo.matrix]\ncheck = [\"matrix\", \"--version\"]\n\
+                    install = [\"cargo\", \"install\", \"matrix\"]\n\
+                    [[target.default.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        assert_eq!(rakefile.tools().max_tag_width(), super::CHECK_TAG.len());
+        Ok(())
+    }
+
+    #[test]
+    fn max_tag_width_fish_only() -> TestResult {
+        let toml = "[tool.fish.my_fn]\n\
+                    [[target.default.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        assert_eq!(rakefile.tools().max_tag_width(), super::FISH_TAG.len());
+        Ok(())
+    }
+
+    #[test]
+    fn max_tag_width_cargo_and_fish() -> TestResult {
+        let toml = "[tool.cargo.matrix]\ncheck = [\"matrix\", \"--version\"]\n\
+                    install = [\"cargo\", \"install\", \"matrix\"]\n\
+                    [tool.fish.my_fn]\n\
+                    [[target.default.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        let expected = super::CHECK_TAG.len().max(super::FISH_TAG.len());
+        assert_eq!(rakefile.tools().max_tag_width(), expected);
+        Ok(())
+    }
+
+    // --- ensure dry-run path tests ---
+
+    #[test]
+    fn ensure_dry_run_cargo_tool_announces_without_executing() -> TestResult {
+        // check = ["false"] would fail in live mode; dry_run must not spawn it.
+        let mut table = ToolTable::default();
+        drop(table.cargo.insert("x".to_string(), tool(EXIT1, EXIT1)));
+        table.ensure("x", true, 0)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_dry_run_fish_tool_announces_without_executing() -> TestResult {
+        // fish function does not exist, but dry_run must not run the check.
+        let mut table = ToolTable::default();
+        drop(table.fish.insert(
+            "__nonexistent_fn".to_string(),
+            super::FishTool { hint: None },
+        ));
+        table.ensure("__nonexistent_fn", true, 0)?;
+        Ok(())
+    }
 }

@@ -1012,7 +1012,30 @@ impl Rakefile {
             })
             .max()
             .unwrap_or(0);
-        let name_width = cmd_name_width.max(skip_name_width);
+        let tool_tag_width = plan
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Run(name) => self.targets.get(*name),
+                Step::Skip(_) => None,
+            })
+            .flat_map(|t| {
+                t.tools.iter().map(String::as_str).chain(
+                    t.commands
+                        .iter()
+                        .flat_map(|c| c.tools.iter().map(String::as_str)),
+                )
+            })
+            .map(|tool_name| {
+                if self.tools.fish.contains_key(tool_name) {
+                    "fish".len()
+                } else {
+                    "check".len()
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        let name_width = cmd_name_width.max(skip_name_width).max(tool_tag_width);
         let start = Instant::now();
         let result = self.run_steps(&plan.steps, family, &host, dry_run, name_width);
         let elapsed = start.elapsed();

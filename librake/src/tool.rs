@@ -292,14 +292,14 @@ impl ToolTable {
 /// ```no_run
 /// // Pass the running binary's version string; `true` means a new version was
 /// // installed and the caller should relaunch the updated binary.
-/// if librake::ensure_self_update(env!("CARGO_PKG_VERSION"))? {
+/// if librake::ensure_self_update(env!("CARGO_PKG_VERSION"), 0)? {
 ///     // relaunch the updated binary with the original arguments
 /// }
 /// # Ok::<(), librake::Error>(())
 /// ```
-pub fn ensure_self_update(current_version: &str) -> Result<bool> {
+pub fn ensure_self_update(current_version: &str, name_width: usize) -> Result<bool> {
     const NAME: &str = "cargo-rake";
-    eprint_tool("Checking", "check", NAME, &[], 0);
+    eprint_tool("Checking", "check", NAME, &[], name_width);
 
     let Some(installed) = parse_version_token(current_version) else {
         eprint_tool(
@@ -307,7 +307,7 @@ pub fn ensure_self_update(current_version: &str) -> Result<bool> {
             "check",
             NAME,
             &["could not determine installed version; keeping current".to_string()],
-            0,
+            name_width,
         );
         return Ok(false);
     };
@@ -321,14 +321,20 @@ pub fn ensure_self_update(current_version: &str) -> Result<bool> {
                 "check",
                 NAME,
                 &[format!("version check failed: {message}")],
-                0,
+                name_width,
             );
             return Ok(false);
         }
     };
 
     if latest <= installed {
-        eprint_tool("Up to date", "check", NAME, &[installed.to_string()], 0);
+        eprint_tool(
+            "Up to date",
+            "check",
+            NAME,
+            &[installed.to_string()],
+            name_width,
+        );
         return Ok(false);
     }
 
@@ -337,7 +343,7 @@ pub fn ensure_self_update(current_version: &str) -> Result<bool> {
         "check",
         NAME,
         &[format!("{installed} -> {latest}")],
-        0,
+        name_width,
     );
 
     // Windows: the OS locks running executables, so `cargo install` cannot
@@ -1183,7 +1189,7 @@ cmd = ["cargo", "matrix", "build"]
     fn ensure_self_update_unparseable_version_is_nonfatal() -> TestResult {
         // An unparseable version prints a Warning and returns Ok(false) with no
         // registry lookup or install attempt.
-        let updated = super::ensure_self_update("not-a-version")?;
+        let updated = super::ensure_self_update("not-a-version", 0)?;
         assert!(!updated, "unparseable version should not trigger an update");
         Ok(())
     }
@@ -1196,7 +1202,7 @@ cmd = ["cargo", "matrix", "build"]
         // Without network: the version check errors out and the Warning branch
         // is taken instead — also Ok(false).  Either way no install is
         // triggered and the assertion holds.
-        let updated = super::ensure_self_update("99999.0.0")?;
+        let updated = super::ensure_self_update("99999.0.0", 0)?;
         assert!(
             !updated,
             "impossibly high version should never trigger an install"

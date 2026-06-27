@@ -275,6 +275,9 @@ ps = "Remove-Item -Force lcov.info -ErrorAction Ignore"
 [target.most]
 depends_on = ["fmt", "clippy", "build", "test", "coverage", "musl"]
 
+[target.most.windows]
+depends_on = ["fmt", "clippy", "build", "test", "coverage"]
+
 [target.daily.windows]
 depends_on = ["all", "^musl", "^install"]
 

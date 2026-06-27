@@ -964,28 +964,31 @@ impl Rakefile {
         self.run_impl(names, family, host, true)
     }
 
-    fn run_impl(
-        &self,
-        names: &[&str],
-        family: ShellFamily,
-        host: Host,
-        dry_run: bool,
-    ) -> Result<RunReport> {
-        // A `^name` token marks a target to skip rather than a root to run; the
-        // rest are roots. With only skips named, fall back to the default target.
+    /// Compute the tag-column width for running `names` without executing.
+    ///
+    /// Builds the same execution plan that [`run`](Self::run) would use and
+    /// returns the `name_width` value: the maximum of all command names, skipped
+    /// target names, and tool-tag strings in that plan. Callers that need to
+    /// print aligned output *before* the run (e.g. a self-update check) can use
+    /// this to match the column width that the run itself will use.
+    ///
+    /// # Errors
+    /// Propagates any planning error (`UnknownTarget`, `SkipNotAllowed`, etc.).
+    pub fn plan_name_width(&self, names: &[&str]) -> Result<usize> {
         let (mut roots, skips) = split_skip_targets(names);
         if roots.is_empty() {
             roots.push(crate::DEFAULT_TARGET);
         }
-        // Resolve the order before the timer: a pre-execution error (an unknown
-        // target, or a skip nothing else can do without) aborts without printing
-        // a total `Runtime` line.
         let plan = graph::execution_order_with_skips(
             &self.targets,
             &self.excluded_targets,
             &roots,
             &skips,
         )?;
+        Ok(self.name_width_for(&plan))
+    }
+
+    fn name_width_for(&self, plan: &graph::ExecutionPlan<'_>) -> usize {
         let cmd_name_width = plan
             .steps
             .iter()
@@ -1026,16 +1029,36 @@ impl Rakefile {
                         .flat_map(|c| c.tools.iter().map(String::as_str)),
                 )
             })
-            .map(|tool_name| {
-                if self.tools.fish.contains_key(tool_name) {
-                    "fish".len()
-                } else {
-                    "check".len()
-                }
-            })
+            .filter_map(|tool_name| self.tools.tag_for(tool_name))
+            .map(str::len)
             .max()
             .unwrap_or(0);
-        let name_width = cmd_name_width.max(skip_name_width).max(tool_tag_width);
+        cmd_name_width.max(skip_name_width).max(tool_tag_width)
+    }
+
+    fn run_impl(
+        &self,
+        names: &[&str],
+        family: ShellFamily,
+        host: Host,
+        dry_run: bool,
+    ) -> Result<RunReport> {
+        // A `^name` token marks a target to skip rather than a root to run; the
+        // rest are roots. With only skips named, fall back to the default target.
+        let (mut roots, skips) = split_skip_targets(names);
+        if roots.is_empty() {
+            roots.push(crate::DEFAULT_TARGET);
+        }
+        // Resolve the order before the timer: a pre-execution error (an unknown
+        // target, or a skip nothing else can do without) aborts without printing
+        // a total `Runtime` line.
+        let plan = graph::execution_order_with_skips(
+            &self.targets,
+            &self.excluded_targets,
+            &roots,
+            &skips,
+        )?;
+        let name_width = self.name_width_for(&plan);
         let start = Instant::now();
         let result = self.run_steps(&plan.steps, family, &host, dry_run, name_width);
         let elapsed = start.elapsed();
@@ -2915,6 +2938,31 @@ cmd = ["cargo", "doc"]
         let rf2 = Rakefile::from_toml_str_with_host(toml, &macos_host())?;
         let foo2 = rf2.target("foo").ok_or("expected 'foo'")?;
         assert_eq!(foo2.depends_on, vec!["dep-base".to_string()]);
+        Ok(())
+    }
+
+    // --- plan_name_width tests ---
+
+    #[test]
+    fn plan_name_width_unknown_target_is_error() -> TestResult {
+        let toml = "[[target.build.command]]\nname = \"c\"\ncmd = [\"true\"]\n";
+        let rakefile = Rakefile::from_toml_str(toml)?;
+        match rakefile.plan_name_width(&["ghost"]) {
+            Err(Error::UnknownTarget { name }) => {
+                assert_eq!(name, "ghost");
+                Ok(())
+            }
+            other => Err(format!("expected UnknownTarget, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn plan_name_width_returns_command_name_length() -> TestResult {
+        let toml =
+            "[[target.default.command]]\nname = \"my-build\"\n".to_string() + CMD_EXIT0 + "\n";
+        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let width = rakefile.plan_name_width(&["default"])?;
+        assert_eq!(width, "my-build".len());
         Ok(())
     }
 }

@@ -355,23 +355,7 @@ fn run(cli: &Cli) -> Result<()> {
         // Respect an explicitly-declared toolchain (verify/install the channel and
         // pin to it); a Rakefile without the key is a quiet no-op.
         librake::ensure_rust_toolchain(rakefile.toolchain())?;
-        let self_update_name_width = {
-            let cmd_w = rakefile
-                .targets()
-                .values()
-                .flat_map(|t| t.commands.iter())
-                .map(|c| c.name.len())
-                .max()
-                .unwrap_or(0);
-            let tag_w = if !rakefile.tools().cargo.is_empty() || !rakefile.tools().os.is_empty() {
-                "check".len()
-            } else if !rakefile.tools().fish.is_empty() {
-                "fish".len()
-            } else {
-                0
-            };
-            cmd_w.max(tag_w)
-        };
+        let self_update_name_width = rakefile.plan_name_width(&names)?;
         if rakefile.update()
             && librake::ensure_self_update(env!("CARGO_PKG_VERSION"), self_update_name_width)?
         {

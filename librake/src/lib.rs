@@ -296,11 +296,12 @@ pub fn exit_code(status: ExitStatus) -> i32 {
     }
 }
 
-/// Render the targets of `rakefile` for display, in declaration order. For
-/// each target the output shows the target name; a `    platform: <tokens>`
-/// line when the target declares a top-level `platform`; `depends_on` and
-/// `tools` summaries; and each command's name and body (cmd or shell variants)
-/// with per-command `(platform: …)`/`(arch: …)`/`(tools: …)`/`(skip_on_error)` markers.
+/// Render the targets of `rakefile` for display, in declaration order.
+///
+/// Platform-specific variants are resolved at parse time, so only the matched
+/// variant's commands appear. For each target the output shows the target name;
+/// `depends_on` and `tools` summaries; and each command's name and body (cmd or
+/// shell variants) with per-command `(platform: …)`/`(arch: …)`/`(tools: …)`/`(skip_on_error)` markers.
 ///
 /// # Examples
 ///

@@ -230,10 +230,15 @@ depends_on = ["test"]
     shell, so shell features (`$(...)` substitution, `~`/`$VAR` expansion, globs,
     pipes) apply: `sh -c`, `fish -c`, and PowerShell `-Command` (`pwsh` if on
     `PATH`, else `powershell`) respectively. rake resolves the current shell in
-    priority order: (1) a PowerShell environment variable
+    priority order: (0) `RAKE_SHELL` env variable — set it to any shell name
+    (`fish`, `sh`, `bash`, `pwsh`, …) to pin the family, skipping all other
+    detection; (1) a PowerShell environment variable
     (`POWERSHELL_DISTRIBUTION_CHANNEL` or `PSModulePath` on non-Windows) —
-    checked first because PowerShell does not set `$SHELL`; (2) `$SHELL`'s
-    basename; (3) the platform default (`ps` on Windows, Posix otherwise).
+    checked before `$SHELL` because PowerShell does not set `$SHELL`; (2)
+    `FISH_VERSION` env variable, exported by fish to all child processes —
+    checked before `$SHELL` because `$SHELL` reflects the login shell, not the
+    running shell; (3) `$SHELL`'s basename; (4) the platform default (`ps` on
+    Windows, Posix otherwise).
     Selection is **strict**: if the detected shell has no matching variant, the
     run aborts with an error — so define a variant for every shell a command must
     run under. A `platform`/`arch` mismatch, by contrast, is a silent skip, not

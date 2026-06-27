@@ -322,8 +322,18 @@ fn shell_family_from_env(
 
 /// Detect the current shell family from the process environment.
 ///
-/// The `RAKE_SHELL` environment variable overrides automatic detection; set it
-/// to any shell name (`fish`, `sh`, `bash`, `pwsh`, etc.) to pin the family.
+/// The detection follows a fixed priority order (first match wins):
+///
+/// 0. `RAKE_SHELL` env variable — set to any shell name (`fish`, `sh`, `bash`,
+///    `pwsh`, …) to pin the family, skipping all other detection.
+/// 1. `POWERSHELL_DISTRIBUTION_CHANNEL` or `PSModulePath` (non-Windows only) —
+///    checked before `$SHELL` because PowerShell does not set `$SHELL`.
+/// 2. `FISH_VERSION` env variable — exported by fish to all child processes;
+///    checked before `$SHELL` because `$SHELL` reflects the login shell, not
+///    the running shell.
+/// 3. `$SHELL`'s basename — classified into a [`ShellFamily`].
+/// 4. Platform default — [`ShellFamily::Ps`] on Windows, [`ShellFamily::Posix`]
+///    otherwise.
 ///
 /// # Examples
 ///
@@ -514,11 +524,16 @@ impl Rakefile {
     /// - [`Error::EmptyCmd`] — a `cmd` array with no program
     /// - [`Error::DuplicateCommand`] — two commands in one target share a `name`
     /// - [`Error::UnknownDependency`] / [`Error::CircularDependency`]
+    /// - [`Error::ConflictingDependency`] — a `depends_on` entry appears both
+    ///   with and without a `^` prefix
     /// - [`Error::InvalidPlatformVariant`] — an unknown key in a target table
-    /// - [`Error::TargetNotAvailableOnPlatform`] — a required target exists only
-    ///   as platform-specific variants that don't match the current host
+    ///   (including the old `platform = [...]` field at the target level)
     /// - [`Error::InvalidPlatform`] / [`Error::InvalidArch`] /
     ///   [`Error::EmptyPlatformList`] — command-level platform/arch list errors
+    /// - [`Error::UnknownCommandTool`] — a command's `tools` entry has no
+    ///   matching tool definition
+    /// - [`Error::ToolDeclaredAtBothLevels`] — a tool name appears in both the
+    ///   target's and a command's `tools` list
     ///
     /// # Examples
     ///
@@ -613,6 +628,27 @@ impl Rakefile {
     ///     rakefile.target("sign").and_then(|t| t.commands.first()).map(|c| c.name.as_str()),
     ///     Some("noop")
     /// );
+    /// # Ok::<(), librake::Error>(())
+    /// ```
+    ///
+    /// A target that exists only as a platform-specific variant is excluded (not
+    /// an error) when no variant matches the current host — it simply does not
+    /// appear in [`targets()`](Self::targets):
+    ///
+    /// ```
+    /// use librake::{Host, Rakefile};
+    ///
+    /// let toml = r#"
+    /// [target.notarize.macos]
+    /// [[target.notarize.macos.command]]
+    /// name = "submit"
+    /// cmd  = ["xcrun", "notarytool", "submit"]
+    /// "#;
+    ///
+    /// let linux_host = Host { os: "linux", family: "unix", arch: "x86_64" };
+    /// let rakefile = Rakefile::from_toml_str_with_host(toml, &linux_host)?;
+    /// // The macOS-only target is excluded on Linux — not an error, just absent.
+    /// assert!(rakefile.target("notarize").is_none());
     /// # Ok::<(), librake::Error>(())
     /// ```
     pub fn from_toml_str_with_host(s: &str, host: &Host) -> Result<Self> {
@@ -779,6 +815,8 @@ impl Rakefile {
     ///
     /// # Errors
     /// Returns [`Error::UnknownTarget`] if any entry in `names` is not defined,
+    /// [`Error::TargetNotAvailableOnPlatform`] if a root or skip target exists
+    /// only as platform-specific variants that don't match the current host,
     /// [`Error::MissingShellVariant`] if a selected command has no variant for
     /// the detected shell, or [`Error::Spawn`] if a command's program cannot be
     /// launched.
@@ -878,7 +916,11 @@ impl Rakefile {
     /// pinned — the test seam for dry-run unit tests.
     ///
     /// # Errors
-    /// As [`run_dry`](Self::run_dry).
+    /// Returns [`Error::UnknownTarget`] for an unknown root or skip target,
+    /// [`Error::TargetNotAvailableOnPlatform`] when a root or skip target exists
+    /// only as platform-specific variants that don't match the pinned host, or
+    /// [`Error::MissingShellVariant`] when a command has no variant for the
+    /// pinned shell.
     ///
     /// # Examples
     ///
@@ -892,6 +934,26 @@ impl Rakefile {
     /// assert!(report.status.is_none());
     /// # Ok(())
     /// # }
+    /// ```
+    ///
+    /// Requesting a platform-only target on a non-matching host returns
+    /// [`Error::TargetNotAvailableOnPlatform`]:
+    ///
+    /// ```
+    /// use librake::{Error, Host, Rakefile, ShellFamily};
+    ///
+    /// let toml = r#"
+    /// [target.notarize.macos]
+    /// [[target.notarize.macos.command]]
+    /// name = "submit"
+    /// cmd  = ["xcrun", "notarytool", "submit"]
+    /// "#;
+    ///
+    /// let linux_host = Host { os: "linux", family: "unix", arch: "x86_64" };
+    /// let rakefile = Rakefile::from_toml_str_with_host(toml, &linux_host)?;
+    /// let err = rakefile.run_dry_with(&["notarize"], ShellFamily::Posix, linux_host);
+    /// assert!(matches!(err, Err(Error::TargetNotAvailableOnPlatform { .. })));
+    /// # Ok::<(), librake::Error>(())
     /// ```
     pub fn run_dry_with(
         &self,

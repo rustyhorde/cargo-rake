@@ -2152,6 +2152,41 @@ cmd = ["cargo", "doc"]
     }
 
     #[test]
+    fn run_with_absent_tool_install_populates_updates() -> TestResult {
+        // Tool is absent (check=false) and installs (install=true); the
+        // resulting UpdateRecord must appear in RunReport.updates.
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT1}\ninstall = {TOML_EXIT0}\n\
+                    [target.build]\ntools = [\"t\"]\n\
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let report = rakefile.run(&["build"])?;
+        assert_eq!(report.updates.len(), 1, "expected one update record");
+        assert_eq!(report.updates[0].name, "t");
+        assert!(report.updates[0].from.is_none());
+        assert!(report.updates[0].to.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn command_tool_absent_install_populates_updates() -> TestResult {
+        // Command-level tool is absent and installs; its UpdateRecord must appear
+        // in RunReport.updates (covers the updates.push path in run_one).
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT1}\ninstall = {TOML_EXIT0}\n\
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\ntools = [\"t\"]\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let report = rakefile.run(&["build"])?;
+        assert_eq!(report.updates.len(), 1, "expected one update record");
+        assert_eq!(report.updates[0].name, "t");
+        assert!(report.updates[0].from.is_none());
+        assert!(report.updates[0].to.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn shared_tool_is_ensured_once_per_run() -> TestResult {
         // Both `build` and its dependency `dep` reference the same present tool;
         // ensuring is deduped, so the run completes (and `install`, `false`,

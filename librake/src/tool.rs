@@ -772,8 +772,8 @@ fn eprint_tool(label: &str, tag: &str, name: &str, detail: &[String], name_width
 #[cfg(test)]
 mod tests {
     use super::{
-        CargoTool, CratesIoCrate, CratesIoResponse, OsTool, SemverCheck, ToolTable, ensure_cargo,
-        ensure_os, parse_version_token, pick_version, validate,
+        CargoTool, CratesIoCrate, CratesIoResponse, OsTool, SemverCheck, ToolTable, UpdateRecord,
+        ensure_cargo, ensure_os, parse_version_token, pick_version, validate,
     };
     use crate::{error::Error, rakefile::Rakefile};
     use semver::Version;
@@ -990,28 +990,39 @@ cmd = ["cargo", "matrix", "build"]
     #[test]
     fn ensure_present_tool_skips_install() -> TestResult {
         // `check` succeeds, so `install` (which would fail) must not run.
-        drop(ensure_cargo("present", &tool(EXIT0, EXIT1), 0)?);
+        let record = ensure_cargo("present", &tool(EXIT0, EXIT1), 0)?;
+        assert!(record.is_none(), "present tool must return None");
         Ok(())
     }
 
     #[test]
     fn ensure_absent_tool_installs() -> TestResult {
-        // `check` fails (absent) so `install` runs and succeeds.
-        drop(ensure_cargo("absent", &tool(EXIT1, EXIT0), 0)?);
+        // `check` fails (absent) so `install` runs and succeeds; fresh installs
+        // have no from/to version since we don't re-probe after install.
+        let record = ensure_cargo("absent", &tool(EXIT1, EXIT0), 0)?;
+        let r = record.ok_or("expected Some(UpdateRecord) for fresh install")?;
+        assert_eq!(r.name, "absent");
+        assert!(r.from.is_none(), "fresh install has no prior version");
+        assert!(r.to.is_none(), "fresh install has no post version");
         Ok(())
     }
 
     #[test]
     fn ensure_os_present_tool_is_ok() -> TestResult {
         // `check` succeeds, so a missing `install` is fine and no error fires.
-        drop(ensure_os("present", &os_tool(EXIT0, &[], None), 0)?);
+        let record = ensure_os("present", &os_tool(EXIT0, &[], None), 0)?;
+        assert!(record.is_none(), "present os tool must return None");
         Ok(())
     }
 
     #[test]
     fn ensure_os_absent_with_install_runs_it() -> TestResult {
         // Absent (`check` fails), but a declared `install` (exit 0) runs and succeeds.
-        drop(ensure_os("absent", &os_tool(EXIT1, EXIT0, None), 0)?);
+        let record = ensure_os("absent", &os_tool(EXIT1, EXIT0, None), 0)?;
+        let r = record.ok_or("expected Some(UpdateRecord) for os tool install")?;
+        assert_eq!(r.name, "absent");
+        assert!(r.from.is_none());
+        assert!(r.to.is_none());
         Ok(())
     }
 
@@ -1430,5 +1441,53 @@ cmd = ["cargo", "matrix", "build"]
         ));
         drop(table.ensure("__nonexistent_fn", true, 0)?);
         Ok(())
+    }
+
+    // --- print_update_summary tests ---
+
+    #[test]
+    fn print_update_summary_empty_is_noop() {
+        // Empty slice: early return, nothing written to stderr.
+        super::print_update_summary(&[]);
+    }
+
+    #[test]
+    fn print_update_summary_updated_both_versions() {
+        // (Some(from), Some(to)) → "Updated" label with "name from → to".
+        super::print_update_summary(&[UpdateRecord {
+            name: "cargo-nextest".to_string(),
+            from: Some("0.9.0".to_string()),
+            to: Some("0.9.90".to_string()),
+        }]);
+    }
+
+    #[test]
+    fn print_update_summary_updated_from_only() {
+        // (Some(from), None) → "Updated" label with "name from → ?".
+        super::print_update_summary(&[UpdateRecord {
+            name: "cargo-nextest".to_string(),
+            from: Some("0.9.0".to_string()),
+            to: None,
+        }]);
+    }
+
+    #[test]
+    fn print_update_summary_installed_with_version() {
+        // (None, Some(to)) → "Installed" label with "name version".
+        super::print_update_summary(&[UpdateRecord {
+            name: "cargo-nextest".to_string(),
+            from: None,
+            to: Some("0.9.90".to_string()),
+        }]);
+    }
+
+    #[test]
+    fn print_update_summary_installed_no_versions() {
+        // (None, None) → "Installed" label with bare name.
+        super::print_update_summary(&[UpdateRecord {
+            name: "cargo-nextest".to_string(),
+            from: None,
+            to: None,
+        }]);
     }
 }

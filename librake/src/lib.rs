@@ -274,7 +274,10 @@ pub use crate::{
         Command, Host, Rakefile, RunReport, ShellFamily, Target, detect_shell_family,
         format_duration, print_runtime, print_total_runtime,
     },
-    tool::{CHECK_TAG, CargoTool, FishTool, OsTool, SemverCheck, ToolTable, ensure_self_update},
+    tool::{
+        CHECK_TAG, CargoTool, FishTool, OsTool, SemverCheck, ToolTable, UpdateRecord,
+        ensure_self_update, print_update_summary,
+    },
     toolchain::ensure_rust_toolchain,
 };
 

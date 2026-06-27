@@ -21,6 +21,7 @@
 //! `Updating`), each a right-justified bold-cyan status-label prefix in the run's
 //! shared column, matching the command status lines.
 
+use std::io::{Write, stderr};
 use std::process::Command as ProcessCommand;
 
 use indexmap::IndexMap;
@@ -49,6 +50,23 @@ pub enum SemverCheck {
 pub const CHECK_TAG: &str = "check";
 /// The status-line bracket tag used by fish function tools: `[ fish ]`.
 pub(crate) const FISH_TAG: &str = "fish";
+
+/// A tool install or version update that occurred during a run.
+///
+/// Collected by the run machinery and returned in [`RunReport::updates`]; the
+/// binaries print a consolidated summary after the final `Runtime` line.
+#[derive(Debug, Clone)]
+pub struct UpdateRecord {
+    /// The tool's name (e.g. `"cargo-nextest"` or `"cargo-rake"` for the
+    /// self-update).
+    pub name: String,
+    /// The version that was present before the update, or `None` when the tool
+    /// was not previously installed.
+    pub from: Option<String>,
+    /// The version now installed, or `None` when the post-install version was
+    /// not determined (fresh installs via `cargo install` do not re-probe).
+    pub to: Option<String>,
+}
 
 /// The top-level `[tool]` table, split into the three tool categories.
 ///
@@ -271,18 +289,27 @@ impl ToolTable {
     /// in neither is a silent no-op (references are validated up front by
     /// [`validate`], so this cannot happen for a validated `Rakefile`).
     ///
+    /// Returns `Some(`[`UpdateRecord`]`)` when a tool was newly installed or
+    /// updated to a newer version; `None` when it was already present and
+    /// current (or when the check was skipped in dry-run mode).
+    ///
     /// # Errors
     /// Propagates the install/requirement errors of the dispatched ensure.
-    pub(crate) fn ensure(&self, name: &str, dry_run: bool, name_width: usize) -> Result<()> {
+    pub(crate) fn ensure(
+        &self,
+        name: &str,
+        dry_run: bool,
+        name_width: usize,
+    ) -> Result<Option<UpdateRecord>> {
         if dry_run {
             // In dry-run mode, announce the dependency but skip the check and
             // any install — no processes are spawned. Use the same tag as the
             // live path so the output is consistent.
             let Some(tag) = self.tag_for(name) else {
-                return Ok(());
+                return Ok(None);
             };
             eprint_tool("Checking", tag, name, &[], name_width);
-            return Ok(());
+            return Ok(None);
         }
         if let Some(tool) = self.cargo.get(name) {
             ensure_cargo(name, tool, name_width)
@@ -291,7 +318,7 @@ impl ToolTable {
         } else if let Some(tool) = self.fish.get(name) {
             ensure_fish(name, tool, name_width)
         } else {
-            Ok(())
+            Ok(None)
         }
     }
 }
@@ -304,9 +331,9 @@ impl ToolTable {
 /// failures are non-fatal (a `Warning` line is printed and the run continues),
 /// consistent with how cargo tool update failures are handled.
 ///
-/// Returns `true` when a new version was installed, `false` when already up to
-/// date (or when the version check could not be performed). The caller should
-/// re-exec the updated binary when this returns `true`.
+/// Returns `Some(`[`UpdateRecord`]`)` when a new version was installed (the
+/// caller should re-exec the updated binary), or `None` when already up to
+/// date or when the version check could not be performed.
 ///
 /// # Errors
 /// Returns [`Error::SelfUpdatePrepare`] if the running binary cannot be renamed
@@ -317,14 +344,17 @@ impl ToolTable {
 /// # Examples
 ///
 /// ```no_run
-/// // Pass the running binary's version string; `true` means a new version was
-/// // installed and the caller should relaunch the updated binary.
-/// if librake::ensure_self_update(env!("CARGO_PKG_VERSION"), 0)? {
+/// // Pass the running binary's version string; `Some(_)` means a new version
+/// // was installed and the caller should relaunch the updated binary.
+/// if librake::ensure_self_update(env!("CARGO_PKG_VERSION"), 0)?.is_some() {
 ///     // relaunch the updated binary with the original arguments
 /// }
 /// # Ok::<(), librake::Error>(())
 /// ```
-pub fn ensure_self_update(current_version: &str, name_width: usize) -> Result<bool> {
+pub fn ensure_self_update(
+    current_version: &str,
+    name_width: usize,
+) -> Result<Option<UpdateRecord>> {
     const NAME: &str = "cargo-rake";
     eprint_tool("Checking", CHECK_TAG, NAME, &[], name_width);
 
@@ -336,12 +366,12 @@ pub fn ensure_self_update(current_version: &str, name_width: usize) -> Result<bo
             &["could not determine installed version; keeping current".to_string()],
             name_width,
         );
-        return Ok(false);
+        return Ok(None);
     };
 
     let latest = match latest_crate_version(NAME) {
         Ok(Some(v)) => v,
-        Ok(None) => return Ok(false),
+        Ok(None) => return Ok(None),
         Err(message) => {
             eprint_tool(
                 "Warning",
@@ -350,7 +380,7 @@ pub fn ensure_self_update(current_version: &str, name_width: usize) -> Result<bo
                 &[format!("version check failed: {message}")],
                 name_width,
             );
-            return Ok(false);
+            return Ok(None);
         }
     };
 
@@ -362,7 +392,7 @@ pub fn ensure_self_update(current_version: &str, name_width: usize) -> Result<bo
             &[installed.to_string()],
             name_width,
         );
-        return Ok(false);
+        return Ok(None);
     }
 
     eprint_tool(
@@ -382,7 +412,11 @@ pub fn ensure_self_update(current_version: &str, name_width: usize) -> Result<bo
 
     let install = vec!["cargo".to_string(), "install".to_string(), NAME.to_string()];
     run_install(NAME, &install)?;
-    Ok(true)
+    Ok(Some(UpdateRecord {
+        name: NAME.to_string(),
+        from: Some(installed.to_string()),
+        to: Some(latest.to_string()),
+    }))
 }
 
 /// Rename the running executable to `<exe>.bak` so `cargo install` can place
@@ -418,7 +452,7 @@ fn rename_for_self_update() -> Result<()> {
 /// caught by [`validate`]), or [`Error::ToolInstallSpawn`] /
 /// [`Error::ToolInstallFailed`] if the install command cannot be launched or
 /// exits non-zero.
-fn ensure_cargo(name: &str, tool: &CargoTool, name_width: usize) -> Result<()> {
+fn ensure_cargo(name: &str, tool: &CargoTool, name_width: usize) -> Result<Option<UpdateRecord>> {
     let Some((program, args)) = tool.check.split_first() else {
         return Err(Error::EmptyToolCommand {
             tool: name.to_string(),
@@ -432,7 +466,12 @@ fn ensure_cargo(name: &str, tool: &CargoTool, name_width: usize) -> Result<()> {
 
     if !present {
         eprint_tool("Installing", CHECK_TAG, name, &tool.install, name_width);
-        return run_install(name, &tool.install);
+        run_install(name, &tool.install)?;
+        return Ok(Some(UpdateRecord {
+            name: name.to_string(),
+            from: None,
+            to: None,
+        }));
     }
 
     let installed = output
@@ -440,14 +479,14 @@ fn ensure_cargo(name: &str, tool: &CargoTool, name_width: usize) -> Result<()> {
         .and_then(|o| parse_installed_version(&o.stdout, &o.stderr));
 
     if tool.update {
-        update_if_newer(name, tool, installed.as_ref(), name_width)?;
+        update_if_newer(name, tool, installed.as_ref(), name_width)
     } else {
         // Present and not an `update` tool: report what is already installed,
         // including the parsed version when the `check` output carried one.
         let detail = installed.map_or_else(Vec::new, |v| vec![v.to_string()]);
         eprint_tool("Present", CHECK_TAG, name, &detail, name_width);
+        Ok(None)
     }
-    Ok(())
 }
 
 /// Ensure a single OS tool is available.
@@ -463,7 +502,7 @@ fn ensure_cargo(name: &str, tool: &CargoTool, name_width: usize) -> Result<()> {
 /// [`validate`]), [`Error::RequiredToolMissing`] when the tool is absent and has
 /// no `install`, or [`Error::ToolInstallSpawn`] / [`Error::ToolInstallFailed`]
 /// if a declared install cannot be launched or exits non-zero.
-fn ensure_os(name: &str, tool: &OsTool, name_width: usize) -> Result<()> {
+fn ensure_os(name: &str, tool: &OsTool, name_width: usize) -> Result<Option<UpdateRecord>> {
     let Some((program, args)) = tool.check.split_first() else {
         return Err(Error::EmptyToolCommand {
             tool: name.to_string(),
@@ -477,7 +516,7 @@ fn ensure_os(name: &str, tool: &OsTool, name_width: usize) -> Result<()> {
 
     if present {
         eprint_tool("Present", CHECK_TAG, name, &[], name_width);
-        return Ok(());
+        return Ok(None);
     }
 
     if tool.install.is_empty() {
@@ -487,7 +526,12 @@ fn ensure_os(name: &str, tool: &OsTool, name_width: usize) -> Result<()> {
         });
     }
     eprint_tool("Installing", CHECK_TAG, name, &tool.install, name_width);
-    run_install(name, &tool.install)
+    run_install(name, &tool.install)?;
+    Ok(Some(UpdateRecord {
+        name: name.to_string(),
+        from: None,
+        to: None,
+    }))
 }
 
 /// Ensure a fish shell function is available.
@@ -499,7 +543,7 @@ fn ensure_os(name: &str, tool: &OsTool, name_width: usize) -> Result<()> {
 ///
 /// The check covers user-defined functions, autoloaded functions, and builtins,
 /// matching what `fish -c "functions --query <name>"` reports.
-fn ensure_fish(name: &str, tool: &FishTool, name_width: usize) -> Result<()> {
+fn ensure_fish(name: &str, tool: &FishTool, name_width: usize) -> Result<Option<UpdateRecord>> {
     eprint_tool("Checking", FISH_TAG, name, &[], name_width);
     let present = ProcessCommand::new("fish")
         .args(["-c", &format!("functions --query {name}")])
@@ -507,7 +551,7 @@ fn ensure_fish(name: &str, tool: &FishTool, name_width: usize) -> Result<()> {
         .is_ok_and(|s| s.success());
     if present {
         eprint_tool("Present", FISH_TAG, name, &[], name_width);
-        Ok(())
+        Ok(None)
     } else {
         Err(Error::RequiredToolMissing {
             tool: name.to_string(),
@@ -526,12 +570,15 @@ fn parse_installed_version(stdout: &[u8], stderr: &[u8]) -> Option<Version> {
 
 /// When `update = true`, re-install the tool if [`latest_version`] reports a
 /// version newer than `installed`. Version-check failures are non-fatal.
+///
+/// Returns `Some(`[`UpdateRecord`]`)` when the tool was updated, `None` when
+/// already up to date or when the version check could not be performed.
 fn update_if_newer(
     name: &str,
     tool: &CargoTool,
     installed: Option<&Version>,
     name_width: usize,
-) -> Result<()> {
+) -> Result<Option<UpdateRecord>> {
     // Without a parseable installed version there is nothing to compare against,
     // and reinstalling on every run is worse than keeping the current one — so
     // skip the update (and the registry lookup) entirely.
@@ -543,11 +590,11 @@ fn update_if_newer(
             &["could not determine installed version; keeping current".to_string()],
             name_width,
         );
-        return Ok(());
+        return Ok(None);
     };
     let latest = match latest_version(tool) {
         Ok(Some(latest)) => latest,
-        Ok(None) => return Ok(()),
+        Ok(None) => return Ok(None),
         Err(message) => {
             eprint_tool(
                 "Warning",
@@ -556,7 +603,7 @@ fn update_if_newer(
                 &[format!("version check failed: {message}")],
                 name_width,
             );
-            return Ok(());
+            return Ok(None);
         }
     };
     if latest > *installed {
@@ -567,7 +614,12 @@ fn update_if_newer(
             &[format!("{installed} -> {latest}")],
             name_width,
         );
-        return run_install(name, &tool.install);
+        run_install(name, &tool.install)?;
+        return Ok(Some(UpdateRecord {
+            name: name.to_string(),
+            from: Some(installed.to_string()),
+            to: Some(latest.to_string()),
+        }));
     }
     eprint_tool(
         "Up to date",
@@ -576,7 +628,7 @@ fn update_if_newer(
         &[installed.to_string()],
         name_width,
     );
-    Ok(())
+    Ok(None)
 }
 
 /// Run a tool's `install` command, inheriting stdio so its progress is visible.
@@ -676,6 +728,25 @@ fn parse_version_token(stdout: &str) -> Option<Version> {
     stdout
         .split_whitespace()
         .find_map(|token| Version::parse(token.strip_prefix('v').unwrap_or(token)).ok())
+}
+
+/// Print a blank separator followed by one `Updated` or `Installed` status
+/// line per [`UpdateRecord`], using [`print_label`] so the labels align in the
+/// shared status column. Does nothing when `updates` is empty.
+pub fn print_update_summary(updates: &[UpdateRecord]) {
+    if updates.is_empty() {
+        return;
+    }
+    let _ = writeln!(stderr()).ok();
+    for record in updates {
+        let (label, info) = match (&record.from, &record.to) {
+            (Some(from), Some(to)) => ("Updated", format!("{} {from} → {to}", record.name)),
+            (Some(from), None) => ("Updated", format!("{} {from} → ?", record.name)),
+            (None, Some(to)) => ("Installed", format!("{} {to}", record.name)),
+            (None, None) => ("Installed", record.name.clone()),
+        };
+        print_label(label, &info);
+    }
 }
 
 /// Print a tool status line via [`print_label`]: the `label` (e.g. `Checking`,
@@ -919,28 +990,28 @@ cmd = ["cargo", "matrix", "build"]
     #[test]
     fn ensure_present_tool_skips_install() -> TestResult {
         // `check` succeeds, so `install` (which would fail) must not run.
-        ensure_cargo("present", &tool(EXIT0, EXIT1), 0)?;
+        drop(ensure_cargo("present", &tool(EXIT0, EXIT1), 0)?);
         Ok(())
     }
 
     #[test]
     fn ensure_absent_tool_installs() -> TestResult {
         // `check` fails (absent) so `install` runs and succeeds.
-        ensure_cargo("absent", &tool(EXIT1, EXIT0), 0)?;
+        drop(ensure_cargo("absent", &tool(EXIT1, EXIT0), 0)?);
         Ok(())
     }
 
     #[test]
     fn ensure_os_present_tool_is_ok() -> TestResult {
         // `check` succeeds, so a missing `install` is fine and no error fires.
-        ensure_os("present", &os_tool(EXIT0, &[], None), 0)?;
+        drop(ensure_os("present", &os_tool(EXIT0, &[], None), 0)?);
         Ok(())
     }
 
     #[test]
     fn ensure_os_absent_with_install_runs_it() -> TestResult {
         // Absent (`check` fails), but a declared `install` (exit 0) runs and succeeds.
-        ensure_os("absent", &os_tool(EXIT1, EXIT0, None), 0)?;
+        drop(ensure_os("absent", &os_tool(EXIT1, EXIT0, None), 0)?);
         Ok(())
     }
 
@@ -984,7 +1055,7 @@ cmd = ["cargo", "matrix", "build"]
         let mut tool = tool(EXIT0, EXIT1);
         tool.update = true;
         tool.crate_name = Some("anything".to_string());
-        ensure_cargo("present-no-version", &tool, 0)?;
+        drop(ensure_cargo("present-no-version", &tool, 0)?);
         Ok(())
     }
 
@@ -1192,7 +1263,11 @@ cmd = ["cargo", "matrix", "build"]
             return Ok(());
         }
         // `cd` is a fish builtin always available.
-        super::ensure_fish("cd", &super::FishTool { hint: None }, 0)?;
+        drop(super::ensure_fish(
+            "cd",
+            &super::FishTool { hint: None },
+            0,
+        )?);
         Ok(())
     }
 
@@ -1214,10 +1289,13 @@ cmd = ["cargo", "matrix", "build"]
 
     #[test]
     fn ensure_self_update_unparseable_version_is_nonfatal() -> TestResult {
-        // An unparseable version prints a Warning and returns Ok(false) with no
+        // An unparseable version prints a Warning and returns Ok(None) with no
         // registry lookup or install attempt.
         let updated = super::ensure_self_update("not-a-version", 0)?;
-        assert!(!updated, "unparseable version should not trigger an update");
+        assert!(
+            updated.is_none(),
+            "unparseable version should not trigger an update"
+        );
         Ok(())
     }
 
@@ -1225,13 +1303,13 @@ cmd = ["cargo", "matrix", "build"]
     fn ensure_self_update_already_up_to_date() -> TestResult {
         // With network: latest_crate_version("cargo-rake") returns the real
         // published version (e.g. 0.4.2), which is <= 99999.0.0, so the
-        // "Up to date" branch is taken and Ok(false) is returned.
+        // "Up to date" branch is taken and Ok(None) is returned.
         // Without network: the version check errors out and the Warning branch
-        // is taken instead — also Ok(false).  Either way no install is
+        // is taken instead — also Ok(None).  Either way no install is
         // triggered and the assertion holds.
         let updated = super::ensure_self_update("99999.0.0", 0)?;
         assert!(
-            !updated,
+            updated.is_none(),
             "impossibly high version should never trigger an install"
         );
         Ok(())
@@ -1338,7 +1416,7 @@ cmd = ["cargo", "matrix", "build"]
         // check = ["false"] would fail in live mode; dry_run must not spawn it.
         let mut table = ToolTable::default();
         drop(table.cargo.insert("x".to_string(), tool(EXIT1, EXIT1)));
-        table.ensure("x", true, 0)?;
+        drop(table.ensure("x", true, 0)?);
         Ok(())
     }
 
@@ -1350,7 +1428,7 @@ cmd = ["cargo", "matrix", "build"]
             "__nonexistent_fn".to_string(),
             super::FishTool { hint: None },
         ));
-        table.ensure("__nonexistent_fn", true, 0)?;
+        drop(table.ensure("__nonexistent_fn", true, 0)?);
         Ok(())
     }
 }

@@ -254,7 +254,7 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use clap::FromArgMatches as _;
 use librake::cli::{Action, Cli};
-use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets};
+use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets, print_update_summary};
 use vergen_pretty::{Pretty, vergen_pretty_env};
 
 // Dev-dependencies used only by the `tests/` integration suite; named here so
@@ -325,6 +325,7 @@ fn run(cli: &Cli) -> Result<()> {
     } else {
         rakefile.run(&names)?
     };
+    print_update_summary(&report.updates);
     match report.status {
         Some(status) => exit(exit_code(status)),
         // No command ran (a depends-only target chain or dry-run): treat as success.

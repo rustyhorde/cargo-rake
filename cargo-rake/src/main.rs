@@ -218,8 +218,7 @@
 #![cfg_attr(
     all(feature = "unstable", nightly),
     deny(
-        fuzzy_provenance_casts,
-        lossy_provenance_casts,
+        implicit_provenance_casts,
         multiple_supertrait_upcastable,
         must_not_suspend,
         non_exhaustive_omitted_patterns,
@@ -255,7 +254,9 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use clap::FromArgMatches as _;
 use librake::cli::{Action, Cli};
-use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets};
+use librake::{
+    DEFAULT_TARGET, Rakefile, UpdateRecord, exit_code, list_targets, print_update_summary,
+};
 use vergen_pretty::{Pretty, vergen_pretty_env};
 
 // Dev-dependencies used only by the `tests/` integration suite; named here so
@@ -304,6 +305,40 @@ fn relaunch() -> Result<()> {
     exit(exit_code(status));
 }
 
+/// Env var set (before relaunch) to communicate a self-update to the freshly
+/// installed binary. Value format: `"{from_version}|{to_version}"`.
+const SELF_UPDATE_ENV: &str = "RAKE_SELF_UPDATED";
+
+/// Read the `RAKE_SELF_UPDATED` env var written by the pre-relaunch binary and
+/// parse it into an [`UpdateRecord`]. Returns `None` when the var is absent or
+/// malformed (the malformed case is silently ignored — the summary just omits
+/// the entry).
+fn read_self_update_env() -> Option<UpdateRecord> {
+    let val = std::env::var(SELF_UPDATE_ENV).ok()?;
+    let (from, to) = val.split_once('|')?;
+    Some(UpdateRecord {
+        name: "cargo-rake".to_string(),
+        from: Some(from.to_string()),
+        to: Some(to.to_string()),
+    })
+}
+
+/// Encode `record` into `RAKE_SELF_UPDATED` so the relaunched binary can
+/// include the self-update in its end-of-run summary.
+///
+/// # Safety
+/// Called before any threads are spawned (early startup), so `set_var` is safe.
+#[allow(unsafe_code)]
+fn write_self_update_env(record: &UpdateRecord) {
+    let val = format!(
+        "{}|{}",
+        record.from.as_deref().unwrap_or(""),
+        record.to.as_deref().unwrap_or(""),
+    );
+    // Safety: no other threads exist at this point in startup.
+    unsafe { std::env::set_var(SELF_UPDATE_ENV, val) }
+}
+
 fn main() -> Result<()> {
     // Remove any stale .bak file left by the previous self-update cycle.
     #[cfg(windows)]
@@ -350,6 +385,10 @@ fn run(cli: &Cli) -> Result<()> {
         }
         _ => vec![DEFAULT_TARGET],
     };
+    // If this binary was freshly installed by a previous invocation (the old
+    // binary set RAKE_SELF_UPDATED before relaunching), capture that record now
+    // so we can include it in the end-of-run update summary.
+    let pre_updates: Vec<UpdateRecord> = read_self_update_env().into_iter().collect();
     // In dry-run mode, skip toolchain setup (nothing will actually execute).
     if !cli.dry_run {
         // Respect an explicitly-declared toolchain (verify/install the channel and
@@ -357,18 +396,25 @@ fn run(cli: &Cli) -> Result<()> {
         librake::ensure_rust_toolchain(rakefile.toolchain())?;
         let self_update_name_width = rakefile.plan_name_width(&names)?;
         if rakefile.update()
-            && librake::ensure_self_update(env!("CARGO_PKG_VERSION"), self_update_name_width)?
+            && let Some(record) =
+                librake::ensure_self_update(env!("CARGO_PKG_VERSION"), self_update_name_width)?
         {
+            write_self_update_env(&record);
             relaunch()?;
         }
     }
     // `run`/`run_dry` prints the total `Runtime` line itself (on success and on
     // an aborting error alike), so the error still propagates after that line.
-    let report = if cli.dry_run {
+    let mut report = if cli.dry_run {
         rakefile.run_dry(&names)?
     } else {
         rakefile.run(&names)?
     };
+    // Print the consolidated update summary: self-update (if any) followed by
+    // tool installs/updates that occurred during this run.
+    let mut all_updates = pre_updates;
+    all_updates.append(&mut report.updates);
+    print_update_summary(&all_updates);
     match report.status {
         Some(status) => exit(exit_code(status)),
         // No command ran (a depends-only target chain or dry-run): treat as success.

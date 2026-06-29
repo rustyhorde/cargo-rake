@@ -530,3 +530,23 @@ fn works_without_rake_prefix() -> TestResult {
         .stdout(predicate::str::contains("hello"));
     Ok(())
 }
+
+#[cfg(not(windows))]
+#[test]
+fn pre_update_env_var_appears_in_summary() -> TestResult {
+    // When the RAKE_SELF_UPDATED env var is set (written by the pre-relaunch
+    // binary), the freshly started binary reads it via read_self_update_env()
+    // and includes it in the end-of-run print_update_summary() output.
+    let dir = rakefile_dir(
+        "update = false\n\
+         [[target.default.command]]\nname = \"ok\"\ncmd = [\"true\"]\n",
+    )?;
+    cargo_rake(&dir)?
+        .env("RAKE_SELF_UPDATED", "0.4.0|0.5.0")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Updated"))
+        .stderr(predicate::str::contains("cargo-rake"))
+        .stderr(predicate::str::contains("0.4.0"));
+    Ok(())
+}

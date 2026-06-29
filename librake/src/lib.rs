@@ -229,8 +229,7 @@
 #![cfg_attr(
     all(feature = "unstable", nightly),
     deny(
-        fuzzy_provenance_casts,
-        lossy_provenance_casts,
+        implicit_provenance_casts,
         multiple_supertrait_upcastable,
         must_not_suspend,
         non_exhaustive_omitted_patterns,
@@ -274,7 +273,10 @@ pub use crate::{
         Command, Host, Rakefile, RunReport, ShellFamily, Target, detect_shell_family,
         format_duration, print_runtime, print_total_runtime,
     },
-    tool::{CHECK_TAG, CargoTool, FishTool, OsTool, SemverCheck, ToolTable, ensure_self_update},
+    tool::{
+        CHECK_TAG, CargoTool, FishTool, OsTool, SemverCheck, ToolTable, UpdateRecord,
+        ensure_self_update, print_update_summary,
+    },
     toolchain::ensure_rust_toolchain,
 };
 

@@ -10,7 +10,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4.6.5"
 clap_mangen = "0.3.0"
 indexmap = { version = "2.14.0", features = ["serde"] }
-librake = { version = "0.4.4", path = "librake" }
+librake = { version = "0.5.0", path = "librake" }
 predicates = "3.1.4"
 rustversion = "1.0.22"
 semver = "1.0.28"

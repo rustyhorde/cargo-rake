@@ -16,7 +16,7 @@ use crate::{
     error::{Error, Result},
     graph::{self, Step},
     tool,
-    tool::ToolTable,
+    tool::{ToolTable, UpdateRecord},
 };
 
 /// A single named command within a target.
@@ -482,7 +482,7 @@ pub struct Rakefile {
 
 /// The outcome of running a target: the exit status of the last command that
 /// ran, plus the total wall-clock time spent running the chain.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RunReport {
     /// The [`ExitStatus`] of the last command to run, or `None` when no command
     /// ran at all (a target chain defined purely by `depends_on`). Callers
@@ -491,6 +491,10 @@ pub struct RunReport {
     /// Total wall-clock time spent running the target and its transitive
     /// dependencies.
     pub elapsed: Duration,
+    /// Tool installs and version updates that occurred while running the target
+    /// chain. Empty when no tools were installed or updated (all already
+    /// present and current), or in dry-run mode (no real ensures executed).
+    pub updates: Vec<UpdateRecord>,
 }
 
 impl Rakefile {
@@ -1060,14 +1064,26 @@ impl Rakefile {
         )?;
         let name_width = self.name_width_for(&plan);
         let start = Instant::now();
-        let result = self.run_steps(&plan.steps, family, &host, dry_run, name_width);
+        let mut updates: Vec<UpdateRecord> = Vec::new();
+        let result = self.run_steps(
+            &plan.steps,
+            family,
+            &host,
+            dry_run,
+            name_width,
+            &mut updates,
+        );
         let elapsed = start.elapsed();
         // Print the total runtime on every path that started executing. In dry-run
         // mode there is no real work to time, so the line is skipped.
         if !dry_run {
             print_total_runtime(elapsed);
         }
-        result.map(|status| RunReport { status, elapsed })
+        result.map(|status| RunReport {
+            status,
+            elapsed,
+            updates,
+        })
     }
 
     fn run_steps<'rf>(
@@ -1077,6 +1093,7 @@ impl Rakefile {
         host: &Host,
         dry_run: bool,
         name_width: usize,
+        updates: &mut Vec<UpdateRecord>,
     ) -> Result<Option<ExitStatus>> {
         let mut status = None;
         let mut ensured: HashSet<&'rf str> = HashSet::new();
@@ -1091,8 +1108,10 @@ impl Rakefile {
                     };
                     // Ensure each target-level tool before any command runs.
                     for tool in &target.tools {
-                        if ensured.insert(tool.as_str()) {
-                            self.tools.ensure(tool, dry_run, name_width)?;
+                        if ensured.insert(tool.as_str())
+                            && let Some(record) = self.tools.ensure(tool, dry_run, name_width)?
+                        {
+                            updates.push(record);
                         }
                     }
                     let (current, stop) = run_one(
@@ -1104,6 +1123,7 @@ impl Rakefile {
                         name_width,
                         &self.tools,
                         &mut ensured,
+                        updates,
                     )?;
                     if current.is_some() {
                         status = current;
@@ -1337,7 +1357,7 @@ fn resolve_platform_variants(
 /// Command-level tools are ensured immediately before the command that requires
 /// them, after the platform/arch skip check — so a skipped command never triggers
 /// its tool checks. The `ensured` set deduplicates ensures across the whole run.
-// Eight parameters keeps related context together without introducing a struct;
+// Nine parameters keeps related context together without introducing a struct;
 // `run_one` is private so there is no public-API concern here.
 #[cfg_attr(nightly, allow(clippy::too_many_arguments))]
 fn run_one<'rf>(
@@ -1349,6 +1369,7 @@ fn run_one<'rf>(
     name_width: usize,
     tools: &ToolTable,
     ensured: &mut HashSet<&'rf str>,
+    updates: &mut Vec<UpdateRecord>,
 ) -> Result<(Option<ExitStatus>, bool)> {
     let mut last = None;
     for command in &target.commands {
@@ -1363,8 +1384,10 @@ fn run_one<'rf>(
         // per run. Skipped commands (above) never reach this point, so their
         // tools are not ensured when the platform/arch excludes them.
         for tool in &command.tools {
-            if ensured.insert(tool.as_str()) {
-                tools.ensure(tool, dry_run, name_width)?;
+            if ensured.insert(tool.as_str())
+                && let Some(record) = tools.ensure(tool, dry_run, name_width)?
+            {
+                updates.push(record);
             }
         }
         // Resolve the invocation before the timer: a command with no variant for
@@ -1443,6 +1466,8 @@ const STATUS_LABELS: &[&str] = &[
     "Up to date",
     "Updating",
     "Warning",
+    "Updated",
+    "Installed",
 ];
 
 /// The longest [`STATUS_LABELS`] entry, in bytes (all ASCII, so == chars).
@@ -2124,6 +2149,41 @@ cmd = ["cargo", "doc"]
             }
             other => Err(format!("expected ToolInstallFailed, got {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn run_with_absent_tool_install_populates_updates() -> TestResult {
+        // Tool is absent (check=false) and installs (install=true); the
+        // resulting UpdateRecord must appear in RunReport.updates.
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT1}\ninstall = {TOML_EXIT0}\n\
+                    [target.build]\ntools = [\"t\"]\n\
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let report = rakefile.run(&["build"])?;
+        assert_eq!(report.updates.len(), 1, "expected one update record");
+        assert_eq!(report.updates[0].name, "t");
+        assert!(report.updates[0].from.is_none());
+        assert!(report.updates[0].to.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn command_tool_absent_install_populates_updates() -> TestResult {
+        // Command-level tool is absent and installs; its UpdateRecord must appear
+        // in RunReport.updates (covers the updates.push path in run_one).
+        let toml = format!(
+            "[tool.cargo.t]\ncheck = {TOML_EXIT1}\ninstall = {TOML_EXIT0}\n\
+                    [[target.build.command]]\nname = \"c\"\n{CMD_EXIT0}\ntools = [\"t\"]\n"
+        );
+        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let report = rakefile.run(&["build"])?;
+        assert_eq!(report.updates.len(), 1, "expected one update record");
+        assert_eq!(report.updates[0].name, "t");
+        assert!(report.updates[0].from.is_none());
+        assert!(report.updates[0].to.is_none());
+        Ok(())
     }
 
     #[test]

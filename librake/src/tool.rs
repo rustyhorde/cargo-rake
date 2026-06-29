@@ -23,10 +23,12 @@
 
 use std::io::{Write, stderr};
 use std::process::Command as ProcessCommand;
+use std::sync::OnceLock;
 
 use indexmap::IndexMap;
 use semver::Version;
 use serde::Deserialize;
+use ureq::tls::{RootCerts, TlsConfig};
 
 use crate::{
     error::{Error, Result},
@@ -704,10 +706,29 @@ fn pick_version(krate: &CratesIoCrate) -> Option<Version> {
         .and_then(|v| Version::parse(v).ok())
 }
 
+/// Returns a shared `ureq::Agent` configured to verify TLS certificates using the
+/// OS platform verifier rather than a bundled Mozilla root list. This allows the
+/// agent to trust corporate CA certificates installed in the system keystore, which
+/// is necessary when running behind a firewall that performs TLS inspection.
+fn http_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .tls_config(
+                TlsConfig::builder()
+                    .root_certs(RootCerts::PlatformVerifier)
+                    .build(),
+            )
+            .build()
+            .new_agent()
+    })
+}
+
 /// Query the crates.io registry API for the latest version of `crate_name`.
 fn latest_crate_version(crate_name: &str) -> core::result::Result<Option<Version>, String> {
     let url = format!("https://crates.io/api/v1/crates/{crate_name}");
-    let mut response = ureq::get(&url)
+    let mut response = http_agent()
+        .get(&url)
         .header(
             "User-Agent",
             "cargo-rake (https://github.com/rustyhorde/cargo-rake)",

@@ -262,7 +262,15 @@ pub fn basic_feature_status() {
 mod tests {
     use std::error::Error;
 
-    use super::{LicenseVerifier, SignedLicense, basic_feature_status, load_license};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use chrono::{DateTime, Utc};
+
+    use super::{
+        Features, LicensePayload, LicenseVerifier, SignedLicense, basic_feature_status,
+        format_licensee, load_license, remove_license, verifying_key_configured,
+    };
+    use crate::error::Error as RakeError;
 
     #[test]
     fn load_license_no_config_returns_none() -> Result<(), Box<dyn Error>> {
@@ -307,6 +315,137 @@ mod tests {
         if let Ok(verifier) = LicenseVerifier::new() {
             let bad = SignedLicense("notvalid".to_owned());
             assert!(verifier.verify(&bad).is_err());
+        }
+    }
+
+    #[test]
+    fn verifying_key_configured_returns_true() {
+        // The current placeholder bytes are non-zero, so the guard must return true.
+        assert!(verifying_key_configured());
+    }
+
+    #[test]
+    fn format_licensee_with_expiry() -> Result<(), Box<dyn Error>> {
+        let expires_at: DateTime<Utc> = "2025-01-15T00:00:00Z".parse()?;
+        let payload = LicensePayload {
+            licensee: "test@example.com".to_owned(),
+            features: Features { basic: true },
+            expires_at: Some(expires_at),
+            issued_at: Utc::now(),
+        };
+        let formatted = format_licensee(&payload);
+        assert!(formatted.contains("test@example.com"));
+        assert!(formatted.contains("2025-01-15"));
+        Ok(())
+    }
+
+    #[test]
+    fn format_licensee_perpetual() {
+        let payload = LicensePayload {
+            licensee: "perpetual@example.com".to_owned(),
+            features: Features { basic: false },
+            expires_at: None,
+            issued_at: Utc::now(),
+        };
+        let formatted = format_licensee(&payload);
+        assert!(formatted.contains("perpetual@example.com"));
+        assert!(formatted.contains("perpetual"));
+    }
+
+    #[test]
+    fn verify_bad_base64_payload() -> Result<(), Box<dyn Error>> {
+        let verifier = LicenseVerifier::new()?;
+        let key = SignedLicense("not-valid-base64!!!!.something".to_owned());
+        assert!(matches!(
+            verifier.verify(&key),
+            Err(RakeError::LicenseMalformed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_bad_base64_signature() -> Result<(), Box<dyn Error>> {
+        let verifier = LicenseVerifier::new()?;
+        let payload_b64 = BASE64.encode(b"some payload");
+        let key = SignedLicense(format!("{payload_b64}.not-valid-base64!!!!"));
+        assert!(matches!(
+            verifier.verify(&key),
+            Err(RakeError::LicenseMalformed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_signature_wrong_length() -> Result<(), Box<dyn Error>> {
+        let verifier = LicenseVerifier::new()?;
+        let payload_b64 = BASE64.encode(b"some payload");
+        // 32 bytes encodes to valid base64 but try_into [u8; 64] fails.
+        let sig_b64 = BASE64.encode([0u8; 32]);
+        let key = SignedLicense(format!("{payload_b64}.{sig_b64}"));
+        assert!(matches!(
+            verifier.verify(&key),
+            Err(RakeError::LicenseMalformed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_invalid_signature() -> Result<(), Box<dyn Error>> {
+        let verifier = LicenseVerifier::new()?;
+        // 64 zero bytes decode to a valid-length sig array but won't verify against any payload.
+        let payload_b64 = BASE64.encode(b"arbitrary payload bytes");
+        let sig_b64 = BASE64.encode([0u8; 64]);
+        let key = SignedLicense(format!("{payload_b64}.{sig_b64}"));
+        assert!(matches!(
+            verifier.verify(&key),
+            Err(RakeError::LicenseInvalidSignature)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn load_license_env_malformed() {
+        #[allow(unsafe_code)]
+        // SAFETY: nextest runs each test in its own process; no concurrent env mutation.
+        unsafe {
+            std::env::set_var("RAKE_LICENSE", "badkey-no-dot-separator");
+        }
+        let result = load_license();
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::remove_var("RAKE_LICENSE");
+        }
+        assert!(matches!(result, Err(RakeError::LicenseMalformed)));
+    }
+
+    #[test]
+    fn load_license_env_invalid_sig() {
+        // Structurally valid (b64.b64, sig decodes to 64 bytes) but wrong sig bytes
+        // → the cryptographic check must return LicenseInvalidSignature.
+        let payload_b64 = BASE64.encode(b"some-payload-bytes");
+        let sig_b64 = BASE64.encode([0u8; 64]);
+        let key_val = format!("{payload_b64}.{sig_b64}");
+        #[allow(unsafe_code)]
+        // SAFETY: nextest runs each test in its own process; no concurrent env mutation.
+        unsafe {
+            std::env::set_var("RAKE_LICENSE", &key_val);
+        }
+        let result = load_license();
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::remove_var("RAKE_LICENSE");
+        }
+        assert!(matches!(result, Err(RakeError::LicenseInvalidSignature)));
+    }
+
+    #[test]
+    fn remove_license_no_file_or_no_terminal() -> Result<(), Box<dyn Error>> {
+        // When no license file is stored: Ok(()) ("no license key stored").
+        // When a file exists but stdin is not a TTY (always in tests): LicenseRemoveNoTerminal.
+        // Any other outcome is a bug.
+        match remove_license() {
+            Ok(()) | Err(RakeError::LicenseRemoveNoTerminal) => Ok(()),
+            Err(e) => Err(e.into()),
         }
     }
 }

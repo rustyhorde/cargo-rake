@@ -29,17 +29,36 @@ pub struct Cli {
     pub action: Option<Action>,
 }
 
-/// The action to perform: a built-in subcommand (`list`/`syntax`) or, by
-/// default, running the named targets.
+/// The action to perform: a built-in subcommand (`list`/`syntax`/`license`/`basic`)
+/// or, by default, running the named targets.
 ///
-/// `list` and `syntax` are reserved words; a target sharing one of those names
-/// cannot be run by name (run it via a parent target instead).
+/// `list`, `syntax`, `license`, and `basic` are reserved words; a target
+/// sharing one of those names cannot be run by name (run it via a parent
+/// target instead).
 #[derive(Debug, Subcommand)]
 pub enum Action {
     /// List the available targets and their commands.
     List,
     /// Parse and validate the Rakefile, reporting any errors.
     Syntax,
+    /// Activate a license key and persist it for future runs, or remove a
+    /// stored key with `--remove`.
+    ///
+    /// The key is written to the platform config directory
+    /// (`~/.config/rake/license` on Linux/macOS, `%APPDATA%\rake\license` on
+    /// Windows). Omit `KEY` to read the key from stdin instead (useful for
+    /// piping or interactive pasting).
+    #[command(name = "license")]
+    License {
+        /// The license key string. Omit to read from stdin.
+        #[arg(conflicts_with = "remove")]
+        key: Option<String>,
+        /// Remove the stored license key (prompts for confirmation).
+        #[arg(long, conflicts_with = "key")]
+        remove: bool,
+    },
+    /// Show whether the `basic` licensed feature is unlocked.
+    Basic,
     /// Run the named targets (the default action). Runs the union of their
     /// dependency graphs, each target at most once. Prefix a target with `^`
     /// (e.g. `^clean`) to skip it: that target, and any dependency reachable

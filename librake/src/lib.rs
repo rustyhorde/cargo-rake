@@ -260,6 +260,7 @@
 pub mod cli;
 mod error;
 mod graph;
+mod license;
 mod rakefile;
 mod tool;
 mod toolchain;
@@ -269,6 +270,10 @@ use std::process::ExitStatus;
 
 pub use crate::{
     error::{Error, Result},
+    license::{
+        Features, LicensePayload, activate_license, basic_feature_status, load_license,
+        remove_license,
+    },
     rakefile::{
         Command, Host, Rakefile, RunReport, ShellFamily, Target, detect_shell_family,
         format_duration, print_runtime, print_total_runtime,

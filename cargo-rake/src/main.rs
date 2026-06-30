@@ -255,7 +255,8 @@ use anyhow::Result;
 use clap::FromArgMatches as _;
 use librake::cli::{Action, Cli};
 use librake::{
-    DEFAULT_TARGET, Rakefile, UpdateRecord, exit_code, list_targets, print_update_summary,
+    DEFAULT_TARGET, Rakefile, UpdateRecord, activate_license, basic_feature_status, exit_code,
+    list_targets, load_license, print_update_summary, remove_license,
 };
 use vergen_pretty::{Pretty, vergen_pretty_env};
 
@@ -365,6 +366,24 @@ fn main() -> Result<()> {
 }
 
 fn run(cli: &Cli) -> Result<()> {
+    // `license` and `basic` do not need a Rakefile — handle them first.
+    if let Some(Action::License { key, remove }) = &cli.action {
+        if *remove {
+            remove_license()?;
+            return Ok(());
+        }
+        let key_str = match key {
+            Some(k) => k.clone(),
+            None => std::io::read_to_string(std::io::stdin())
+                .map_err(|e| anyhow::anyhow!("failed to read license from stdin: {e}"))?,
+        };
+        let _license = activate_license(key_str.trim())?;
+        return Ok(());
+    }
+    if matches!(cli.action, Some(Action::Basic)) {
+        basic_feature_status();
+        return Ok(());
+    }
     let rakefile = Rakefile::from_path(&cli.file)?;
     match &cli.action {
         Some(Action::List) => {
@@ -377,7 +396,7 @@ fn run(cli: &Cli) -> Result<()> {
             println!("{}: syntax OK", cli.file.display());
             return Ok(());
         }
-        Some(Action::Run(_)) | None => {}
+        Some(Action::License { .. } | Action::Basic | Action::Run(_)) | None => {}
     }
     let names: Vec<&str> = match &cli.action {
         Some(Action::Run(targets)) if !targets.is_empty() => {
@@ -389,8 +408,9 @@ fn run(cli: &Cli) -> Result<()> {
     // binary set RAKE_SELF_UPDATED before relaunching), capture that record now
     // so we can include it in the end-of-run update summary.
     let pre_updates: Vec<UpdateRecord> = read_self_update_env().into_iter().collect();
-    // In dry-run mode, skip toolchain setup (nothing will actually execute).
+    // In dry-run mode, skip toolchain and license setup (nothing will execute).
     if !cli.dry_run {
+        let _license = load_license()?;
         // Respect an explicitly-declared toolchain (verify/install the channel and
         // pin to it); a Rakefile without the key is a quiet no-op.
         librake::ensure_rust_toolchain(rakefile.toolchain())?;

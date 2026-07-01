@@ -353,6 +353,15 @@ pub enum Error {
         /// The offending `toolchain` value.
         value: String,
     },
+    /// The `[lifecycle]` table's `address` value does not parse as a
+    /// `host:port` socket address.
+    #[error(
+        "invalid lifecycle address '{value}': expected a host:port socket address (e.g. 127.0.0.1:9999)"
+    )]
+    InvalidLifecycleAddress {
+        /// The offending `address` value.
+        value: String,
+    },
     /// A license key string is not in the expected format, or its encoding or
     /// cryptographic bytes are invalid.
     #[error("license key is malformed")]

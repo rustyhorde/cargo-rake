@@ -41,21 +41,20 @@ pub enum Action {
     List,
     /// Parse and validate the Rakefile, reporting any errors.
     Syntax,
-    /// Activate a license key and persist it for future runs, or remove a
-    /// stored key with `--remove`.
+    /// Activate a license key, remove the stored key, or show license info.
     ///
-    /// The key is written to the platform config directory
-    /// (`~/.config/rake/license` on Linux/macOS, `%APPDATA%\rake\license` on
-    /// Windows). Omit `KEY` to read the key from stdin instead (useful for
-    /// piping or interactive pasting).
+    /// `rake license <KEY>` activates and persists a key to the platform
+    /// config directory (`~/.config/rake/license` on Linux/macOS,
+    /// `%APPDATA%\rake\license` on Windows); omit `KEY` to read it from
+    /// stdin instead (useful for piping or interactive pasting).
+    /// `rake license remove` removes the stored key. `rake license info`
+    /// shows the licensee and which features are enabled.
     #[command(name = "license")]
     License {
-        /// The license key string. Omit to read from stdin.
-        #[arg(conflicts_with = "remove")]
-        key: Option<String>,
-        /// Remove the stored license key (prompts for confirmation).
-        #[arg(long, conflicts_with = "key")]
-        remove: bool,
+        /// The `remove`/`info` subcommand, or `None` to activate (reading the
+        /// key from an external-subcommand token or, if absent, stdin).
+        #[command(subcommand)]
+        action: Option<LicenseAction>,
     },
     /// Show whether the `basic` licensed feature is unlocked.
     Basic,
@@ -66,6 +65,21 @@ pub enum Action {
     /// target that still runs depends on it.
     #[command(external_subcommand)]
     Run(Vec<String>),
+}
+
+/// A `license` subcommand: `remove`/`info`, or (falling through the
+/// external-subcommand catch-all) the key text to activate.
+#[derive(Debug, Subcommand)]
+pub enum LicenseAction {
+    /// Remove the stored license key (prompts for confirmation).
+    Remove,
+    /// Show the licensee and the enabled/disabled state of every feature
+    /// flag in the currently active license.
+    Info,
+    /// Activate a license key. Falls through here when the token doesn't
+    /// match `remove`/`info`.
+    #[command(external_subcommand)]
+    Activate(Vec<String>),
 }
 
 /// Build the [`clap::Command`] for the CLI, labelled with the given `name` and

@@ -3,18 +3,22 @@
 use std::{
     collections::HashSet,
     io::{IsTerminal, Write, stderr},
+    net::SocketAddr,
     path::Path,
     process::Command as ProcessCommand,
     process::ExitStatus,
     time::{Duration, Instant},
 };
 
+use chrono::Utc;
 use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::{
     error::{Error, Result},
     graph::{self, Step},
+    license::LicensePayload,
+    lifecycle::{Emitter, LifecycleEvent, ToolOutcome},
     tool,
     tool::{ToolTable, UpdateRecord},
 };
@@ -478,6 +482,25 @@ pub struct Rakefile {
     /// [`Error::UnknownDependency`] when a required target is excluded.
     #[serde(skip)]
     excluded_targets: IndexMap<String, Vec<String>>,
+    /// The optional `[lifecycle]` table, enabling before/after lifecycle
+    /// events (see [`crate::lifecycle`]) when also licensed for the `events`
+    /// feature. Absent (the default) is a quiet no-op, matching `toolchain`.
+    #[serde(default)]
+    lifecycle: Option<LifecycleConfig>,
+}
+
+/// Configuration for the optional `[lifecycle]` table: where before/after
+/// lifecycle events are sent when the run is licensed for the `events`
+/// feature. See the [`crate`]-level docs and [`Rakefile::run_licensed`].
+#[derive(Debug, Deserialize)]
+pub(crate) struct LifecycleConfig {
+    /// A `host:port` UDP socket address, e.g. `"127.0.0.1:9999"`, that events
+    /// are sent to (fire-and-forget; nobody needing to listen is fine).
+    address: String,
+    /// `address` parsed once at validation time, so `run_impl` never
+    /// re-parses (or re-fails on) a string it has already validated.
+    #[serde(skip)]
+    resolved_address: Option<SocketAddr>,
 }
 
 /// The outcome of running a target: the exit status of the last command that
@@ -684,9 +707,10 @@ impl Rakefile {
 
     /// Every target must define at least one command or dependency, each
     /// command's `cmd` must be non-empty, the `toolchain` must be a single
-    /// non-empty token, and the dependency graph must be valid (no unknown
-    /// dependencies, no cycles).
-    fn validate(&self) -> Result<()> {
+    /// non-empty token, the `[lifecycle]` table's `address` (if present) must
+    /// parse as a socket address, and the dependency graph must be valid (no
+    /// unknown dependencies, no cycles).
+    fn validate(&mut self) -> Result<()> {
         // When declared, the channel must be a single clean token, so it can be
         // passed safely to the rustup installer as a `--default-toolchain` arg.
         if let Some(toolchain) = &self.toolchain
@@ -695,6 +719,14 @@ impl Rakefile {
             return Err(Error::InvalidToolchain {
                 value: toolchain.clone(),
             });
+        }
+        if let Some(lifecycle) = &mut self.lifecycle {
+            let addr = lifecycle.address.parse::<SocketAddr>().map_err(|_| {
+                Error::InvalidLifecycleAddress {
+                    value: lifecycle.address.clone(),
+                }
+            })?;
+            lifecycle.resolved_address = Some(addr);
         }
         for (name, target) in &self.targets {
             if target.commands.is_empty() && target.depends_on.is_empty() {
@@ -839,7 +871,28 @@ impl Rakefile {
     /// # }
     /// ```
     pub fn run(&self, names: &[&str]) -> Result<RunReport> {
-        self.run_impl(names, detect_shell_family(), Host::detect(), false)
+        self.run_impl(names, detect_shell_family(), Host::detect(), false, None)
+    }
+
+    /// Like [`run`](Self::run) but license-aware: when this Rakefile's
+    /// `[lifecycle]` table is present *and* `license` grants the `events`
+    /// feature, before/after lifecycle events are sent (fire-and-forget, as
+    /// JSON over a loopback UDP socket) for the whole run, each target, each
+    /// command, and each tool check/install/update. Pass `None` for an
+    /// unlicensed run — identical to calling [`run`](Self::run). When
+    /// `[lifecycle]` is configured but `license` does not grant `events`, a
+    /// one-line warning is printed and the run proceeds exactly as
+    /// unlicensed (lifecycle events are an observability side channel, never
+    /// a reason to fail a build).
+    ///
+    /// # Errors
+    /// As [`run`](Self::run).
+    pub fn run_licensed(
+        &self,
+        names: &[&str],
+        license: Option<&LicensePayload>,
+    ) -> Result<RunReport> {
+        self.run_impl(names, detect_shell_family(), Host::detect(), false, license)
     }
 
     /// Like [`run`](Self::run) but without executing any commands: prints the
@@ -854,7 +907,7 @@ impl Rakefile {
     /// [`Error::MissingShellVariant`] when a command has no variant for the
     /// detected shell.
     pub fn run_dry(&self, names: &[&str]) -> Result<RunReport> {
-        self.run_impl(names, detect_shell_family(), Host::detect(), true)
+        self.run_impl(names, detect_shell_family(), Host::detect(), true, None)
     }
 
     /// Like [`run`](Self::run) but with an explicit [`ShellFamily`] rather than
@@ -879,7 +932,7 @@ impl Rakefile {
     /// # }
     /// ```
     pub fn run_with_family(&self, names: &[&str], family: ShellFamily) -> Result<RunReport> {
-        self.run_impl(names, family, Host::detect(), false)
+        self.run_impl(names, family, Host::detect(), false, None)
     }
 
     /// Like [`run_dry`](Self::run_dry) but with an explicit [`ShellFamily`]
@@ -888,7 +941,7 @@ impl Rakefile {
     /// # Errors
     /// As [`run_dry`](Self::run_dry).
     pub fn run_dry_with_family(&self, names: &[&str], family: ShellFamily) -> Result<RunReport> {
-        self.run_impl(names, family, Host::detect(), true)
+        self.run_impl(names, family, Host::detect(), true, None)
     }
 
     /// Like [`run`](Self::run) but with both the [`ShellFamily`] and the [`Host`]
@@ -913,7 +966,7 @@ impl Rakefile {
     /// # }
     /// ```
     pub fn run_with(&self, names: &[&str], family: ShellFamily, host: Host) -> Result<RunReport> {
-        self.run_impl(names, family, host, false)
+        self.run_impl(names, family, host, false, None)
     }
 
     /// Like [`run_dry`](Self::run_dry) but with both [`ShellFamily`] and [`Host`]
@@ -965,7 +1018,7 @@ impl Rakefile {
         family: ShellFamily,
         host: Host,
     ) -> Result<RunReport> {
-        self.run_impl(names, family, host, true)
+        self.run_impl(names, family, host, true, None)
     }
 
     /// Compute the tag-column width for running `names` without executing.
@@ -1046,6 +1099,7 @@ impl Rakefile {
         family: ShellFamily,
         host: Host,
         dry_run: bool,
+        license: Option<&LicensePayload>,
     ) -> Result<RunReport> {
         // A `^name` token marks a target to skip rather than a root to run; the
         // rest are roots. With only skips named, fall back to the default target.
@@ -1063,6 +1117,30 @@ impl Rakefile {
             &skips,
         )?;
         let name_width = self.name_width_for(&plan);
+        // Lifecycle events are a fire-and-forget observability side channel:
+        // dry-run never builds a live emitter (its data would be synthetic),
+        // and a `[lifecycle]` table with no license for `events` warns once
+        // and behaves exactly like an absent one — never a hard error.
+        let emitter = match (&self.lifecycle, license) {
+            (Some(cfg), Some(payload)) if !dry_run && payload.features.events => cfg
+                .resolved_address
+                .map_or_else(Emitter::disabled, Emitter::new),
+            (Some(_), _) if !dry_run => {
+                print_label(
+                    "Warning",
+                    "lifecycle events configured but not licensed — run `rake license <key>` \
+                     to activate; continuing without event emission",
+                );
+                Emitter::disabled()
+            }
+            _ => Emitter::disabled(),
+        };
+        emitter.emit(&LifecycleEvent::BeforeAll {
+            run_id: emitter.run_id().to_string(),
+            ts: Utc::now(),
+            roots: roots.iter().map(|s| (*s).to_string()).collect(),
+            target_count: plan.steps.len(),
+        });
         let start = Instant::now();
         let mut updates: Vec<UpdateRecord> = Vec::new();
         let result = self.run_steps(
@@ -1072,6 +1150,7 @@ impl Rakefile {
             dry_run,
             name_width,
             &mut updates,
+            &emitter,
         );
         let elapsed = start.elapsed();
         // Print the total runtime on every path that started executing. In dry-run
@@ -1079,6 +1158,17 @@ impl Rakefile {
         if !dry_run {
             print_total_runtime(elapsed);
         }
+        emitter.emit(&LifecycleEvent::AfterAll {
+            run_id: emitter.run_id().to_string(),
+            ts: Utc::now(),
+            elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            exit_code: result
+                .as_ref()
+                .ok()
+                .and_then(|s| s.and_then(|st| st.code())),
+            success: !matches!(&result, Ok(Some(st)) if !st.success()),
+            tool_updates: updates.len(),
+        });
         result.map(|status| RunReport {
             status,
             elapsed,
@@ -1086,6 +1176,7 @@ impl Rakefile {
         })
     }
 
+    #[cfg_attr(nightly, allow(clippy::too_many_arguments))]
     fn run_steps<'rf>(
         &'rf self,
         steps: &[Step<'_>],
@@ -1094,6 +1185,7 @@ impl Rakefile {
         dry_run: bool,
         name_width: usize,
         updates: &mut Vec<UpdateRecord>,
+        emitter: &Emitter,
     ) -> Result<Option<ExitStatus>> {
         let mut status = None;
         let mut ensured: HashSet<&'rf str> = HashSet::new();
@@ -1101,6 +1193,12 @@ impl Rakefile {
             match step {
                 Step::Skip(name) => {
                     print_target_skipped(name, name_width);
+                    emitter.emit(&LifecycleEvent::TargetSkipped {
+                        run_id: emitter.run_id().to_string(),
+                        ts: Utc::now(),
+                        target: (*name).to_string(),
+                        reason: "skip requested".to_string(),
+                    });
                 }
                 Step::Run(name) => {
                     let Some(target) = self.targets.get(*name) else {
@@ -1108,12 +1206,25 @@ impl Rakefile {
                     };
                     // Ensure each target-level tool before any command runs.
                     for tool in &target.tools {
-                        if ensured.insert(tool.as_str())
-                            && let Some(record) = self.tools.ensure(tool, dry_run, name_width)?
-                        {
-                            updates.push(record);
+                        if ensured.insert(tool.as_str()) {
+                            ensure_tool_with_events(
+                                &self.tools,
+                                tool,
+                                dry_run,
+                                name_width,
+                                name,
+                                None,
+                                updates,
+                                emitter,
+                            )?;
                         }
                     }
+                    emitter.emit(&LifecycleEvent::BeforeTarget {
+                        run_id: emitter.run_id().to_string(),
+                        ts: Utc::now(),
+                        target: (*name).to_string(),
+                    });
+                    let target_start = Instant::now();
                     let (current, stop) = run_one(
                         name,
                         target,
@@ -1124,7 +1235,18 @@ impl Rakefile {
                         &self.tools,
                         &mut ensured,
                         updates,
+                        emitter,
                     )?;
+                    emitter.emit(&LifecycleEvent::AfterTarget {
+                        run_id: emitter.run_id().to_string(),
+                        ts: Utc::now(),
+                        target: (*name).to_string(),
+                        exit_code: current.and_then(|st| st.code()),
+                        success: !matches!(current, Some(st) if !st.success()),
+                        chain_stopped: stop,
+                        elapsed_ms: u64::try_from(target_start.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                    });
                     if current.is_some() {
                         status = current;
                     }
@@ -1349,6 +1471,48 @@ fn resolve_platform_variants(
     Ok((raw, excluded))
 }
 
+/// Ensure `tool`, emitting `BeforeTool`/`AfterTool` lifecycle events around it
+/// and recording any install/update in `updates`. Shared by the target-level
+/// tool loop in `run_steps` and the command-level tool loop in `run_one`;
+/// `command` is `None` for a target-level tool, `Some` for a command-level one.
+#[cfg_attr(nightly, allow(clippy::too_many_arguments))]
+fn ensure_tool_with_events(
+    tools: &ToolTable,
+    tool: &str,
+    dry_run: bool,
+    name_width: usize,
+    target: &str,
+    command: Option<&str>,
+    updates: &mut Vec<UpdateRecord>,
+    emitter: &Emitter,
+) -> Result<()> {
+    emitter.emit(&LifecycleEvent::BeforeTool {
+        run_id: emitter.run_id().to_string(),
+        ts: Utc::now(),
+        target: target.to_string(),
+        command: command.map(str::to_string),
+        tool: tool.to_string(),
+    });
+    let start = Instant::now();
+    let record = tools.ensure(tool, dry_run, name_width)?;
+    let (outcome, from, to) = ToolOutcome::from_update(record.as_ref());
+    emitter.emit(&LifecycleEvent::AfterTool {
+        run_id: emitter.run_id().to_string(),
+        ts: Utc::now(),
+        target: target.to_string(),
+        command: command.map(str::to_string),
+        tool: tool.to_string(),
+        outcome,
+        from,
+        to,
+        duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+    });
+    if let Some(record) = record {
+        updates.push(record);
+    }
+    Ok(())
+}
+
 /// Run a target's commands in array order under shell `family`. Returns the last
 /// status run (or `None` when the target is a dependency-only aggregator with no
 /// commands) and whether execution should stop (a command failed without
@@ -1357,7 +1521,7 @@ fn resolve_platform_variants(
 /// Command-level tools are ensured immediately before the command that requires
 /// them, after the platform/arch skip check — so a skipped command never triggers
 /// its tool checks. The `ensured` set deduplicates ensures across the whole run.
-// Nine parameters keeps related context together without introducing a struct;
+// Ten parameters keeps related context together without introducing a struct;
 // `run_one` is private so there is no public-API concern here.
 #[cfg_attr(nightly, allow(clippy::too_many_arguments))]
 fn run_one<'rf>(
@@ -1370,6 +1534,7 @@ fn run_one<'rf>(
     tools: &ToolTable,
     ensured: &mut HashSet<&'rf str>,
     updates: &mut Vec<UpdateRecord>,
+    emitter: &Emitter,
 ) -> Result<(Option<ExitStatus>, bool)> {
     let mut last = None;
     for command in &target.commands {
@@ -1378,16 +1543,30 @@ fn run_one<'rf>(
         // dependency chain continue. Reported with a `Skipped` status line.
         if let Some(reason) = command.skip_reason(host) {
             print_skipped(&command.name, &reason, name_width);
+            emitter.emit(&LifecycleEvent::CommandSkipped {
+                run_id: emitter.run_id().to_string(),
+                ts: Utc::now(),
+                target: name.to_string(),
+                command: command.name.clone(),
+                reason,
+            });
             continue;
         }
         // Ensure each command-level tool before this command runs, at most once
         // per run. Skipped commands (above) never reach this point, so their
         // tools are not ensured when the platform/arch excludes them.
         for tool in &command.tools {
-            if ensured.insert(tool.as_str())
-                && let Some(record) = tools.ensure(tool, dry_run, name_width)?
-            {
-                updates.push(record);
+            if ensured.insert(tool.as_str()) {
+                ensure_tool_with_events(
+                    tools,
+                    tool,
+                    dry_run,
+                    name_width,
+                    name,
+                    Some(command.name.as_str()),
+                    updates,
+                    emitter,
+                )?;
             }
         }
         // Resolve the invocation before the timer: a command with no variant for
@@ -1403,7 +1582,8 @@ fn run_one<'rf>(
         if dry_run {
             // Print the "Running" line (same output as a real run) but skip the
             // spawn entirely. No `Cmd Runtime` is printed — there is no real
-            // time to report.
+            // time to report, and (per `run_impl`) the emitter is always
+            // disabled in dry-run, so no before/after command event fires.
             let _ = writeln!(stderr()).ok();
             let cmd_name = if color_stderr() {
                 format!("{GREEN}[ {:>name_width$} ]{RESET}", command.name)
@@ -1417,11 +1597,45 @@ fn run_one<'rf>(
             print_label("Running", &format!("{cmd_name} {invocation}"));
             continue;
         }
+        emitter.emit(&LifecycleEvent::BeforeCommand {
+            run_id: emitter.run_id().to_string(),
+            ts: Utc::now(),
+            target: name.to_string(),
+            command: command.name.clone(),
+        });
         let start = Instant::now();
         let result = spawn_resolved(name, command, &program, &args, name_width);
+        let elapsed = start.elapsed();
         // Print the per-command runtime even when the spawn fails, so a command
         // that was attempted but could not launch still reports its time.
-        print_runtime("Cmd Runtime", start.elapsed());
+        print_runtime("Cmd Runtime", elapsed);
+        // Emit `AfterCommand` before propagating a launch failure via `?`, so a
+        // command that was attempted but never ran still produces an event.
+        let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        match &result {
+            Ok(status) => emitter.emit(&LifecycleEvent::AfterCommand {
+                run_id: emitter.run_id().to_string(),
+                ts: Utc::now(),
+                target: name.to_string(),
+                command: command.name.clone(),
+                exit_code: status.code(),
+                success: status.success(),
+                skip_on_error: command.skip_on_error,
+                chain_stopped: !status.success() && !command.skip_on_error,
+                duration_ms,
+            }),
+            Err(_) => emitter.emit(&LifecycleEvent::AfterCommand {
+                run_id: emitter.run_id().to_string(),
+                ts: Utc::now(),
+                target: name.to_string(),
+                command: command.name.clone(),
+                exit_code: None,
+                success: false,
+                skip_on_error: command.skip_on_error,
+                chain_stopped: true,
+                duration_ms,
+            }),
+        }
         let status = result?;
         last = Some(status);
         if !status.success() && !command.skip_on_error {

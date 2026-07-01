@@ -17,8 +17,8 @@ use crate::rakefile::print_label;
 // Replace with real key bytes before shipping a licensed release.
 // Run the license-authority tool; it prints the const to copy here.
 const VERIFYING_KEY_BYTES: [u8; 32] = [
-    0x5f, 0x4f, 0x41, 0x01, 0x88, 0xc8, 0x2a, 0xd2, 0xf4, 0x2e, 0x63, 0x26, 0x12, 0x5c, 0x44, 0xdc,
-    0x6b, 0x77, 0x02, 0xa5, 0xe8, 0x2d, 0x83, 0x54, 0x3b, 0x5a, 0x4a, 0x98, 0x80, 0x54, 0xec, 0xa3,
+    0xa2, 0x1c, 0xdf, 0x8a, 0x9b, 0x7f, 0xf2, 0x86, 0x23, 0x47, 0x7b, 0x2c, 0x4e, 0xe2, 0x71, 0x7f,
+    0x16, 0x70, 0x53, 0x8b, 0x6f, 0xc7, 0xcd, 0xed, 0x27, 0x7d, 0x43, 0xf2, 0x5f, 0x93, 0x56, 0x3f,
 ];
 
 /// Returns `true` when [`VERIFYING_KEY_BYTES`] has been set to a real key.
@@ -45,6 +45,13 @@ pub struct LicensePayload {
 pub struct Features {
     /// The `basic` gated feature, demonstrated via `rake basic` / `cargo rake basic`.
     pub basic: bool,
+    /// The `events` gated feature, unlocking lifecycle-event emission (see
+    /// [`crate::lifecycle`]) via a Rakefile's `[lifecycle]` table.
+    ///
+    /// `#[serde(default)]` so a license issued before this field existed
+    /// still deserializes (defaulting to locked) rather than failing.
+    #[serde(default)]
+    pub events: bool,
 }
 
 struct SignedLicense(String);
@@ -258,6 +265,35 @@ pub fn basic_feature_status() {
     }
 }
 
+/// Print the licensee and the enabled/disabled state of every feature flag.
+///
+/// Loads the license in soft-fail mode (any error or absent key → no license).
+pub fn license_info_status() {
+    match try_load_payload() {
+        Some(payload) => {
+            print_label("Licensed", &format_licensee(&payload));
+            print_label(
+                "Features",
+                &format!(
+                    "basic: {}, events: {}",
+                    on_off(payload.features.basic),
+                    on_off(payload.features.events),
+                ),
+            );
+        }
+        None => {
+            print_label(
+                "License",
+                "no license active — run `rake license <key>` to activate",
+            );
+        }
+    }
+}
+
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "enabled" } else { "disabled" }
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
@@ -268,7 +304,8 @@ mod tests {
 
     use super::{
         Features, LicensePayload, LicenseVerifier, SignedLicense, basic_feature_status,
-        format_licensee, load_license, remove_license, verifying_key_configured,
+        format_licensee, license_info_status, load_license, remove_license,
+        verifying_key_configured,
     };
     use crate::error::Error as RakeError;
 
@@ -308,6 +345,11 @@ mod tests {
     }
 
     #[test]
+    fn license_info_status_does_not_panic() {
+        license_info_status();
+    }
+
+    #[test]
     fn tampered_key_rejected() {
         // A key with no '.' separator is malformed; test the split logic.
         // If new() fails (placeholder key) the test is vacuously ok — the split
@@ -329,7 +371,10 @@ mod tests {
         let expires_at: DateTime<Utc> = "2025-01-15T00:00:00Z".parse()?;
         let payload = LicensePayload {
             licensee: "test@example.com".to_owned(),
-            features: Features { basic: true },
+            features: Features {
+                basic: true,
+                events: false,
+            },
             expires_at: Some(expires_at),
             issued_at: Utc::now(),
         };
@@ -343,13 +388,27 @@ mod tests {
     fn format_licensee_perpetual() {
         let payload = LicensePayload {
             licensee: "perpetual@example.com".to_owned(),
-            features: Features { basic: false },
+            features: Features {
+                basic: false,
+                events: false,
+            },
             expires_at: None,
             issued_at: Utc::now(),
         };
         let formatted = format_licensee(&payload);
         assert!(formatted.contains("perpetual@example.com"));
         assert!(formatted.contains("perpetual"));
+    }
+
+    #[test]
+    fn features_without_events_field_deserializes_locked() -> Result<(), Box<dyn Error>> {
+        // A license signed before `events` existed has no such key in its JSON
+        // payload; `#[serde(default)]` must default it to `false` rather than
+        // failing deserialization.
+        let features: Features = serde_json::from_str(r#"{"basic":true}"#)?;
+        assert!(features.basic);
+        assert!(!features.events);
+        Ok(())
     }
 
     #[test]

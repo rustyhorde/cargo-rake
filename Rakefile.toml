@@ -14,6 +14,14 @@
 #                          # "nightly-2024-01-01"). Omitted here so this repo's
 #                          # runs use the active toolchain.
 #
+#   [lifecycle]            # OPTIONAL table. Enables before/after lifecycle
+#                          # events (see librake::lifecycle) when the run is
+#                          # also licensed for the `events` feature; absent is
+#                          # a quiet no-op.
+#     address = "..."      # REQUIRED (within the table). A `host:port` UDP
+#                          # socket address events are sent to, fire-and-forget
+#                          # (nobody needing to listen is fine).
+#
 #   [tool.cargo.<name>]    # OPTIONAL table of cargo-installable tools (cargo
 #                          # subcommands, etc.) that targets reference by name.
 #     crate        = "..." # crates.io name; required when update = true.
@@ -75,6 +83,13 @@
 #                             # with `platform` as a logical AND.
 # =============================================================================
 # toolchain = "stable"
+
+# ---------------------------------------------------------------------------
+# lifecycle
+# ---------------------------------------------------------------------------
+
+[lifecycle]
+address = "127.0.0.1:9999"
 
 # ---------------------------------------------------------------------------
 # tools

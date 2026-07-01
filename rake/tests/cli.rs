@@ -476,7 +476,7 @@ fn license_remove_no_license_or_no_terminal() -> TestResult {
     // When a file exists but stdin is not a TTY (always in tests): exit 1 + "not a terminal".
     let output = Command::cargo_bin("rake")?
         .arg("license")
-        .arg("--remove")
+        .arg("remove")
         .output()?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     let no_file = output.status.success() && stderr.contains("no license key stored");
@@ -486,5 +486,18 @@ fn license_remove_no_license_or_no_terminal() -> TestResult {
         "unexpected remove_license output (status={}, stderr={stderr})",
         output.status
     );
+    Ok(())
+}
+
+#[test]
+fn license_info_prints_status() -> TestResult {
+    // `license info` does not need a Rakefile — it exits before loading one.
+    Command::cargo_bin("rake")?
+        .args(["license", "info"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("no license active").or(predicate::str::contains("Features")),
+        );
     Ok(())
 }

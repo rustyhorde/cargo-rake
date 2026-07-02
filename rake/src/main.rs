@@ -244,7 +244,6 @@
     )
 )]
 #![cfg_attr(all(docsrs), feature(doc_cfg))]
-// #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use std::io::Cursor;
 use std::process::exit;

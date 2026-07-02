@@ -14,7 +14,12 @@
 //! have been ensured. The optional top-level `update` key (default `true`)
 //! controls whether `cargo-rake` checks crates.io for a newer version of itself
 //! on startup and installs it automatically; see [`ensure_self_update`] and
-//! [`Rakefile::update`].
+//! [`Rakefile::update`]. An optional top-level `[lifecycle]` table (an
+//! `address` of the form `host:port`) enables before/after lifecycle events
+//! — sent fire-and-forget as JSON over a loopback UDP socket for the whole
+//! run, each target, each command, and each tool check/install/update — but
+//! only when the run is also licensed for the `events` feature (see
+//! [`Rakefile::run_licensed`]); absent or unlicensed is a quiet no-op.
 
 //! librake
 
@@ -260,6 +265,8 @@
 pub mod cli;
 mod error;
 mod graph;
+mod license;
+mod lifecycle;
 mod rakefile;
 mod tool;
 mod toolchain;
@@ -269,6 +276,11 @@ use std::process::ExitStatus;
 
 pub use crate::{
     error::{Error, Result},
+    license::{
+        Features, LicensePayload, activate_license, basic_feature_status, license_info_status,
+        load_license, remove_license,
+    },
+    lifecycle::{LifecycleEvent, ProjectInfo, ToolOutcome},
     rakefile::{
         Command, Host, Rakefile, RunReport, ShellFamily, Target, detect_shell_family,
         format_duration, print_runtime, print_total_runtime,

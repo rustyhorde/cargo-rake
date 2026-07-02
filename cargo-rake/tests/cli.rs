@@ -550,3 +550,59 @@ fn pre_update_env_var_appears_in_summary() -> TestResult {
         .stderr(predicate::str::contains("0.4.0"));
     Ok(())
 }
+
+#[test]
+fn basic_subcommand_prints_status() -> TestResult {
+    // `cargo rake basic` does not need a Rakefile — it exits before loading one.
+    // Prints "locked" when no license is configured, or "enabled for <licensee>"
+    // when a valid license is present on this machine.
+    Command::cargo_bin("cargo-rake")?
+        .args(["rake", "basic"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("locked").or(predicate::str::contains("enabled for")));
+    Ok(())
+}
+
+#[test]
+fn license_subcommand_rejects_malformed_key() -> TestResult {
+    // A key with no '.' separator is malformed; the run must fail with exit 1.
+    Command::cargo_bin("cargo-rake")?
+        .args(["rake", "license", "badkey"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("malformed"));
+    Ok(())
+}
+
+#[test]
+fn license_remove_no_license_or_no_terminal() -> TestResult {
+    // When no license file is stored: success + "no license key stored".
+    // When a file exists but stdin is not a TTY (always in tests): exit 1 + "not a terminal".
+    let output = Command::cargo_bin("cargo-rake")?
+        .args(["rake", "license", "remove"])
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let no_file = output.status.success() && stderr.contains("no license key stored");
+    let no_tty = !output.status.success() && stderr.contains("not a terminal");
+    assert!(
+        no_file || no_tty,
+        "unexpected remove_license output (status={}, stderr={stderr})",
+        output.status
+    );
+    Ok(())
+}
+
+#[test]
+fn license_info_prints_status() -> TestResult {
+    // `cargo rake license info` does not need a Rakefile — it exits before loading one.
+    Command::cargo_bin("cargo-rake")?
+        .args(["rake", "license", "info"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("no license active").or(predicate::str::contains("Features")),
+        );
+    Ok(())
+}

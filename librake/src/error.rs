@@ -353,6 +353,35 @@ pub enum Error {
         /// The offending `toolchain` value.
         value: String,
     },
+    /// The `[lifecycle]` table's `address` value does not parse as a
+    /// `host:port` socket address.
+    #[error(
+        "invalid lifecycle address '{value}': expected a host:port socket address (e.g. 127.0.0.1:9999)"
+    )]
+    InvalidLifecycleAddress {
+        /// The offending `address` value.
+        value: String,
+    },
+    /// A license key string is not in the expected format, or its encoding or
+    /// cryptographic bytes are invalid.
+    #[error("license key is malformed")]
+    LicenseMalformed,
+    /// A license key's signature did not verify — the key may have been tampered
+    /// with or was signed by a different authority.
+    #[error("license signature is invalid")]
+    LicenseInvalidSignature,
+    /// The license key's expiry date has passed.
+    #[error("license has expired")]
+    LicenseExpired,
+    /// Stdin is not a terminal; cannot interactively confirm license removal.
+    #[error(
+        "cannot remove license key: stdin is not a terminal.\n\
+         Run with an interactive terminal to confirm removal."
+    )]
+    LicenseRemoveNoTerminal,
+    /// A filesystem error occurred removing the stored license key file.
+    #[error("failed to remove stored license key: {0}")]
+    LicenseRemoveFailed(io::Error),
 }
 
 /// A `Result` alias using this crate's [`Error`].

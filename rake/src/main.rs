@@ -252,8 +252,11 @@ use std::sync::LazyLock;
 
 use anyhow::Result;
 use clap::FromArgMatches as _;
-use librake::cli::{Action, Cli};
-use librake::{DEFAULT_TARGET, Rakefile, exit_code, list_targets, print_update_summary};
+use librake::cli::{Action, Cli, LicenseAction};
+use librake::{
+    DEFAULT_TARGET, Rakefile, activate_license, basic_feature_status, exit_code,
+    license_info_status, list_targets, load_license, print_update_summary, remove_license,
+};
 use vergen_pretty::{Pretty, vergen_pretty_env};
 
 // Dev-dependencies used only by the `tests/` integration suite; named here so
@@ -291,6 +294,33 @@ fn main() -> Result<()> {
 }
 
 fn run(cli: &Cli) -> Result<()> {
+    // `license` and `basic` do not need a Rakefile — handle them first.
+    if let Some(Action::License { action }) = &cli.action {
+        match action {
+            Some(LicenseAction::Remove) => {
+                remove_license()?;
+                return Ok(());
+            }
+            Some(LicenseAction::Info) => {
+                license_info_status();
+                return Ok(());
+            }
+            Some(LicenseAction::Activate(args)) => {
+                let _license = activate_license(args.join(" ").trim())?;
+                return Ok(());
+            }
+            None => {
+                let key_str = std::io::read_to_string(std::io::stdin())
+                    .map_err(|e| anyhow::anyhow!("failed to read license from stdin: {e}"))?;
+                let _license = activate_license(key_str.trim())?;
+                return Ok(());
+            }
+        }
+    }
+    if matches!(cli.action, Some(Action::Basic)) {
+        basic_feature_status();
+        return Ok(());
+    }
     let rakefile = Rakefile::from_path(&cli.file)?;
     match &cli.action {
         Some(Action::List) => {
@@ -303,7 +333,7 @@ fn run(cli: &Cli) -> Result<()> {
             println!("{}: syntax OK", cli.file.display());
             return Ok(());
         }
-        Some(Action::Run(_)) | None => {}
+        Some(Action::License { .. } | Action::Basic | Action::Run(_)) | None => {}
     }
     let names: Vec<&str> = match &cli.action {
         Some(Action::Run(targets)) if !targets.is_empty() => {
@@ -311,18 +341,22 @@ fn run(cli: &Cli) -> Result<()> {
         }
         _ => vec![DEFAULT_TARGET],
     };
-    // In dry-run mode, skip toolchain setup (nothing will actually execute).
+    // In dry-run mode, skip toolchain and license setup (nothing will execute);
+    // there is therefore no license to gate lifecycle events on, either.
+    let mut license = None;
     if !cli.dry_run {
+        license = load_license()?;
         // `rake` may run on a machine without Rust; ensure a toolchain before any
         // target (which almost always shells out to cargo) runs.
         librake::ensure_rust_toolchain(rakefile.toolchain())?;
     }
-    // `run`/`run_dry` prints the total `Runtime` line itself (on success and on
-    // an aborting error alike), so the error still propagates after that line.
+    // `run_licensed`/`run_dry` prints the total `Runtime` line itself (on
+    // success and on an aborting error alike), so the error still propagates
+    // after that line.
     let report = if cli.dry_run {
         rakefile.run_dry(&names)?
     } else {
-        rakefile.run(&names)?
+        rakefile.run_licensed(&names, license.as_ref())?
     };
     print_update_summary(&report.updates);
     match report.status {

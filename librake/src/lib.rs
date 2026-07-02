@@ -280,6 +280,7 @@ pub use crate::{
         Features, LicensePayload, activate_license, basic_feature_status, license_info_status,
         load_license, remove_license,
     },
+    lifecycle::{LifecycleEvent, ProjectInfo, ToolOutcome},
     rakefile::{
         Command, Host, Rakefile, RunReport, ShellFamily, Target, detect_shell_family,
         format_duration, print_runtime, print_total_runtime,

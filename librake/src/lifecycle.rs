@@ -11,15 +11,15 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::tool::UpdateRecord;
 
 /// A single lifecycle event, externally tagged so a JSON consumer can match
 /// on the `"event"` field without a schema.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
-pub(crate) enum LifecycleEvent {
+pub enum LifecycleEvent {
     /// The whole run is about to start; the execution plan is already known.
     BeforeAll {
         /// Identifier shared by every event emitted during this run.
@@ -165,13 +165,19 @@ pub(crate) enum LifecycleEvent {
         /// Wall-clock time spent ensuring this tool.
         duration_ms: u64,
     },
+    /// A forward-compatibility catch-all: any `"event"` tag a consumer built
+    /// against an older version of this enum doesn't recognize deserializes
+    /// here instead of failing the datagram. Never constructed or emitted by
+    /// this crate itself — `Deserialize`-only.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Whether a tool ensure found the tool already present, installed it fresh,
 /// or updated an older version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ToolOutcome {
+pub enum ToolOutcome {
     /// The tool was already present and current.
     Present,
     /// The tool was absent and has just been installed.
@@ -183,16 +189,16 @@ pub(crate) enum ToolOutcome {
 /// A best-effort snapshot of the run's project context. Detection never
 /// fails the run — anything unavailable (no git binary, not a git checkout,
 /// an unreadable cwd) just leaves the field `None`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct ProjectInfo {
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ProjectInfo {
     /// The process's current working directory, when it could be read.
-    cwd: Option<String>,
+    pub cwd: Option<String>,
     /// The checked-out branch name (or `"HEAD"` when detached), `None`
     /// outside a git working tree or without a `git` binary on `PATH`.
-    git_branch: Option<String>,
+    pub git_branch: Option<String>,
     /// The checked-out commit's full SHA, `None` outside a git working tree
     /// or without a `git` binary on `PATH`.
-    git_sha: Option<String>,
+    pub git_sha: Option<String>,
 }
 
 impl ProjectInfo {
@@ -397,6 +403,26 @@ mod tests {
         let emitter = Emitter::disabled();
         assert_eq!(emitter.run_id(), emitter.run_id());
         assert!(!emitter.run_id().is_empty());
+    }
+
+    #[test]
+    fn lifecycle_event_round_trips_through_json() -> Result<(), Box<dyn Error>> {
+        let original = LifecycleEvent::BeforeTarget {
+            run_id: "abc-123".to_string(),
+            ts: chrono::Utc::now(),
+            target: "build".to_string(),
+        };
+        let bytes = serde_json::to_vec(&original)?;
+        let parsed: LifecycleEvent = serde_json::from_slice(&bytes)?;
+        assert_eq!(original, parsed);
+        Ok(())
+    }
+
+    #[test]
+    fn unrecognized_event_tag_deserializes_as_unknown() -> Result<(), Box<dyn Error>> {
+        let parsed: LifecycleEvent = serde_json::from_str(r#"{"event":"some_future_event"}"#)?;
+        assert_eq!(parsed, LifecycleEvent::Unknown);
+        Ok(())
     }
 
     #[test]

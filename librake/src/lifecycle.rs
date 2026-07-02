@@ -30,6 +30,9 @@ pub(crate) enum LifecycleEvent {
         roots: Vec<String>,
         /// The number of steps (targets to run or skip) in the resolved plan.
         target_count: usize,
+        /// A best-effort snapshot of the run's project context.
+        #[serde(flatten)]
+        project: ProjectInfo,
     },
     /// The whole run has finished (successfully, or via a stopped chain).
     AfterAll {
@@ -177,6 +180,48 @@ pub(crate) enum ToolOutcome {
     Updated,
 }
 
+/// A best-effort snapshot of the run's project context. Detection never
+/// fails the run — anything unavailable (no git binary, not a git checkout,
+/// an unreadable cwd) just leaves the field `None`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct ProjectInfo {
+    /// The process's current working directory, when it could be read.
+    cwd: Option<String>,
+    /// The checked-out branch name (or `"HEAD"` when detached), `None`
+    /// outside a git working tree or without a `git` binary on `PATH`.
+    git_branch: Option<String>,
+    /// The checked-out commit's full SHA, `None` outside a git working tree
+    /// or without a `git` binary on `PATH`.
+    git_sha: Option<String>,
+}
+
+impl ProjectInfo {
+    /// Detect the current project context: the process cwd, and — when
+    /// running inside a git working tree with `git` on `PATH` — the checked
+    /// out branch and commit SHA.
+    pub(crate) fn detect() -> Self {
+        Self {
+            cwd: std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string()),
+            git_branch: run_git(&["rev-parse", "--abbrev-ref", "HEAD"]),
+            git_sha: run_git(&["rev-parse", "HEAD"]),
+        }
+    }
+}
+
+/// Run `git <args>` and return trimmed stdout on success, `None` on any
+/// failure (spawn error, non-git directory, empty output).
+fn run_git(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 impl ToolOutcome {
     /// Derive the outcome and `from`/`to` versions from `ToolTable::ensure`'s
     /// return value, without any changes to `tool.rs` itself: `None` means
@@ -299,7 +344,7 @@ mod tests {
     use std::error::Error;
     use std::sync::{Arc, Mutex};
 
-    use super::{Emitter, LifecycleEvent, Sink, ToolOutcome};
+    use super::{Emitter, LifecycleEvent, ProjectInfo, Sink, ToolOutcome};
     use crate::tool::UpdateRecord;
 
     /// Records every sent payload into a shared buffer, so a test can hold a
@@ -327,6 +372,7 @@ mod tests {
             ts: chrono::Utc::now(),
             roots: vec!["default".to_string()],
             target_count: 1,
+            project: ProjectInfo::detect(),
         });
     }
 

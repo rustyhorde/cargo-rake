@@ -85,6 +85,23 @@ address = "{addr}"
 
     assert_eq!(tags.first(), Some(&"before_all"));
     assert_eq!(tags.last(), Some(&"after_all"));
+
+    let before_all = events.first().ok_or("expected a before_all event")?;
+    // The test process always has a valid cwd; git presence/branch/sha
+    // depend on the sandbox (e.g. a tarball build without `.git`), so only
+    // assert the keys are present, not that they're non-null.
+    assert!(
+        before_all["cwd"].is_string(),
+        "expected cwd in {before_all}"
+    );
+    assert!(
+        before_all.get("git_branch").is_some(),
+        "expected git_branch key in {before_all}"
+    );
+    assert!(
+        before_all.get("git_sha").is_some(),
+        "expected git_sha key in {before_all}"
+    );
     assert!(tags.contains(&"target_skipped"), "tags: {tags:?}");
     assert!(tags.contains(&"command_skipped"), "tags: {tags:?}");
     assert!(tags.contains(&"before_target"));

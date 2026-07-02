@@ -18,7 +18,7 @@ use crate::{
     error::{Error, Result},
     graph::{self, Step},
     license::LicensePayload,
-    lifecycle::{Emitter, LifecycleEvent, ToolOutcome},
+    lifecycle::{Emitter, LifecycleEvent, ProjectInfo, ToolOutcome},
     tool,
     tool::{ToolTable, UpdateRecord},
 };
@@ -1140,6 +1140,7 @@ impl Rakefile {
             ts: Utc::now(),
             roots: roots.iter().map(|s| (*s).to_string()).collect(),
             target_count: plan.steps.len(),
+            project: ProjectInfo::detect(),
         });
         let start = Instant::now();
         let mut updates: Vec<UpdateRecord> = Vec::new();

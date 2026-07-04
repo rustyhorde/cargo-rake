@@ -51,6 +51,13 @@ name = "winonly"
 platform = ["{other_platform}"]
 cmd = ["cargo", "--version"]
 
+[target.quiet]
+events = false
+
+[[target.quiet.command]]
+name = "quiet-cmd"
+cmd = ["cargo", "--version"]
+
 [lifecycle]
 address = "{addr}"
 "#
@@ -66,7 +73,7 @@ address = "{addr}"
         expires_at: None,
         issued_at: Utc::now(),
     };
-    let report = rakefile.run_licensed(&["build", "^extra"], Some(&license))?;
+    let report = rakefile.run_licensed(&["build", "^extra", "quiet"], Some(&license))?;
     assert!(report.status.is_some_and(|s| s.success()));
 
     let mut events = Vec::new();
@@ -124,6 +131,17 @@ address = "{addr}"
         skipped_command["reason"]
             .as_str()
             .is_some_and(|r| r.contains(other_platform))
+    );
+
+    // The "quiet" target opts out of events entirely: neither its own
+    // before/after events nor its command's events should appear anywhere
+    // in the captured stream, even though the run is otherwise licensed and
+    // configured for events.
+    let quiet_events: Vec<&serde_json::Value> =
+        events.iter().filter(|v| v["target"] == "quiet").collect();
+    assert!(
+        quiet_events.is_empty(),
+        "expected no events for target 'quiet', got {quiet_events:?}"
     );
 
     Ok(())

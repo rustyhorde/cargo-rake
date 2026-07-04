@@ -392,6 +392,9 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
         if !target.tools.is_empty() {
             let _ = writeln!(out, "    tools: {}", target.tools.join(", "));
         }
+        if !target.events {
+            let _ = writeln!(out, "    events: false");
+        }
         for command in &target.commands {
             let mut marker = String::new();
             if let Some(platforms) = &command.platform {

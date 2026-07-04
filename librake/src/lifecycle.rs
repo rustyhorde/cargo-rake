@@ -75,6 +75,16 @@ pub enum LifecycleEvent {
         /// Wall-clock time spent running this target's commands.
         elapsed_ms: u64,
     },
+    /// A target opted out of time tracking (`time_tracking = false`);
+    /// emitted immediately after that target's `BeforeTarget` event.
+    NoTimeTracking {
+        /// Identifier shared by every event emitted during this run.
+        run_id: String,
+        /// Wall-clock time the event was emitted.
+        ts: DateTime<Utc>,
+        /// The target's name.
+        target: String,
+    },
     /// A `^`-skipped target was pruned from the run instead of executing.
     TargetSkipped {
         /// Identifier shared by every event emitted during this run.
@@ -408,6 +418,19 @@ mod tests {
     #[test]
     fn lifecycle_event_round_trips_through_json() -> Result<(), Box<dyn Error>> {
         let original = LifecycleEvent::BeforeTarget {
+            run_id: "abc-123".to_string(),
+            ts: chrono::Utc::now(),
+            target: "build".to_string(),
+        };
+        let bytes = serde_json::to_vec(&original)?;
+        let parsed: LifecycleEvent = serde_json::from_slice(&bytes)?;
+        assert_eq!(original, parsed);
+        Ok(())
+    }
+
+    #[test]
+    fn no_time_tracking_event_round_trips_through_json() -> Result<(), Box<dyn Error>> {
+        let original = LifecycleEvent::NoTimeTracking {
             run_id: "abc-123".to_string(),
             ts: chrono::Utc::now(),
             target: "build".to_string(),

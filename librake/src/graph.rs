@@ -365,6 +365,8 @@ mod tests {
             depends_on: depends_on.iter().map(|d| (*d).to_string()).collect(),
             skip_deps: skip_deps.iter().map(|s| (*s).to_string()).collect(),
             tools: Vec::new(),
+            events: true,
+            time_tracking: true,
         }
     }
 

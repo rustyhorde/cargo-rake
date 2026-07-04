@@ -180,7 +180,8 @@ const KNOWN_FAMILY: &[&str] = &["unix", "windows", "wasm"];
 /// Keys that may appear directly in a `[target.X]` table as base fields.
 /// Any other key must be a recognized platform/family token (a variant sub-table)
 /// or it is rejected with [`Error::InvalidPlatformVariant`].
-const KNOWN_TARGET_BASE_KEYS: &[&str] = &["command", "depends_on", "tools"];
+const KNOWN_TARGET_BASE_KEYS: &[&str] =
+    &["command", "depends_on", "tools", "events", "time_tracking"];
 
 /// Recognized architecture tokens for a command's `arch` list (the stable
 /// `target_arch` values [`std::env::consts::ARCH`] can report).
@@ -449,6 +450,21 @@ pub struct Target {
     /// commands run.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Whether this target participates in lifecycle events (see
+    /// [`crate::lifecycle`]). Defaults to `true` (current behavior): events
+    /// still require a top-level `[lifecycle]` table and the `events`
+    /// license feature. Set `false` to have this target — and its
+    /// commands' and tools' before/after/skip events — never fire,
+    /// regardless of that gating.
+    #[serde(default = "default_true")]
+    pub events: bool,
+    /// Whether this target participates in time tracking. Defaults to
+    /// `true`. Set `false` to have a `no_time_tracking` lifecycle event
+    /// fire immediately after this target's `before_target` event (still
+    /// subject to the same `events`/license/`[lifecycle]` gating as every
+    /// other event).
+    #[serde(default = "default_true")]
+    pub time_tracking: bool,
 }
 
 fn default_true() -> bool {
@@ -1194,16 +1210,30 @@ impl Rakefile {
             match step {
                 Step::Skip(name) => {
                     print_target_skipped(name, name_width);
-                    emitter.emit(&LifecycleEvent::TargetSkipped {
-                        run_id: emitter.run_id().to_string(),
-                        ts: Utc::now(),
-                        target: (*name).to_string(),
-                        reason: "skip requested".to_string(),
-                    });
+                    if self.targets.get(*name).is_none_or(|t| t.events) {
+                        emitter.emit(&LifecycleEvent::TargetSkipped {
+                            run_id: emitter.run_id().to_string(),
+                            ts: Utc::now(),
+                            target: (*name).to_string(),
+                            reason: "skip requested".to_string(),
+                        });
+                    }
                 }
                 Step::Run(name) => {
                     let Some(target) = self.targets.get(*name) else {
                         continue;
+                    };
+                    // A target with `events = false` suppresses its own
+                    // before/after events plus every nested command/tool
+                    // event for it, by routing through a disabled emitter —
+                    // `run_one`/`ensure_tool_with_events` never branch on
+                    // whether the emitter they're handed is real.
+                    let disabled_emitter;
+                    let target_emitter: &Emitter = if target.events {
+                        emitter
+                    } else {
+                        disabled_emitter = Emitter::disabled();
+                        &disabled_emitter
                     };
                     // Ensure each target-level tool before any command runs.
                     for tool in &target.tools {
@@ -1216,15 +1246,22 @@ impl Rakefile {
                                 name,
                                 None,
                                 updates,
-                                emitter,
+                                target_emitter,
                             )?;
                         }
                     }
-                    emitter.emit(&LifecycleEvent::BeforeTarget {
-                        run_id: emitter.run_id().to_string(),
+                    target_emitter.emit(&LifecycleEvent::BeforeTarget {
+                        run_id: target_emitter.run_id().to_string(),
                         ts: Utc::now(),
                         target: (*name).to_string(),
                     });
+                    if !target.time_tracking {
+                        target_emitter.emit(&LifecycleEvent::NoTimeTracking {
+                            run_id: target_emitter.run_id().to_string(),
+                            ts: Utc::now(),
+                            target: (*name).to_string(),
+                        });
+                    }
                     let target_start = Instant::now();
                     let (current, stop) = run_one(
                         name,
@@ -1236,10 +1273,10 @@ impl Rakefile {
                         &self.tools,
                         &mut ensured,
                         updates,
-                        emitter,
+                        target_emitter,
                     )?;
-                    emitter.emit(&LifecycleEvent::AfterTarget {
-                        run_id: emitter.run_id().to_string(),
+                    target_emitter.emit(&LifecycleEvent::AfterTarget {
+                        run_id: target_emitter.run_id().to_string(),
                         ts: Utc::now(),
                         target: (*name).to_string(),
                         exit_code: current.and_then(|st| st.code()),
@@ -1385,7 +1422,7 @@ enum Resolution {
 /// targets that were excluded on this host (only defined for other platforms).
 ///
 /// For each `[target.X]` entry the function distinguishes three kinds of keys:
-/// - **base keys** (`command`, `depends_on`, `tools`) — remain in the base target
+/// - **base keys** (`command`, `depends_on`, `tools`, `events`) — remain in the base target
 /// - **variant keys** (any token from [`KNOWN_OS`] or [`KNOWN_FAMILY`]) — declare
 ///   a platform-specific override for that OS/family
 /// - **anything else** — rejected with [`Error::InvalidPlatformVariant`]
@@ -2038,6 +2075,70 @@ cmd = ["cargo", "doc"]
     fn update_true_explicit_round_trips() -> TestResult {
         let src = format!("update = true\n{SAMPLE}");
         assert!(Rakefile::from_toml_str(&src)?.update());
+        Ok(())
+    }
+
+    #[test]
+    fn target_events_defaults_to_true() -> TestResult {
+        let build = Rakefile::from_toml_str(SAMPLE)?
+            .target("build")
+            .ok_or("expected a build target")?
+            .events;
+        assert!(build);
+        Ok(())
+    }
+
+    #[test]
+    fn target_events_false_is_respected() -> TestResult {
+        let src = format!("[target.build]\nevents = false\n{SAMPLE}");
+        let events = Rakefile::from_toml_str(&src)?
+            .target("build")
+            .ok_or("expected a build target")?
+            .events;
+        assert!(!events);
+        Ok(())
+    }
+
+    #[test]
+    fn target_events_true_explicit_round_trips() -> TestResult {
+        let src = format!("[target.build]\nevents = true\n{SAMPLE}");
+        let events = Rakefile::from_toml_str(&src)?
+            .target("build")
+            .ok_or("expected a build target")?
+            .events;
+        assert!(events);
+        Ok(())
+    }
+
+    #[test]
+    fn target_time_tracking_defaults_to_true() -> TestResult {
+        let build = Rakefile::from_toml_str(SAMPLE)?
+            .target("build")
+            .ok_or("expected a build target")?
+            .time_tracking;
+        assert!(build);
+        Ok(())
+    }
+
+    #[test]
+    fn target_time_tracking_false_is_respected() -> TestResult {
+        let src = format!("[target.build]\ntime_tracking = false\n{SAMPLE}");
+        let time_tracking = Rakefile::from_toml_str(&src)?
+            .target("build")
+            .ok_or("expected a build target")?
+            .time_tracking;
+        assert!(!time_tracking);
+        Ok(())
+    }
+
+    #[test]
+    fn target_time_tracking_true_explicit_round_trips() -> TestResult {
+        let src = format!("[target.build]\ntime_tracking = true\n{SAMPLE}");
+        let time_tracking = Rakefile::from_toml_str(&src)?
+            .target("build")
+            .ok_or("expected a build target")?
+            .time_tracking;
+        assert!(time_tracking);
         Ok(())
     }
 
@@ -3164,6 +3265,36 @@ cmd = ["cargo", "doc"]
             }
             other => Err(format!("expected InvalidPlatformVariant, got {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn platform_variant_events_key_allowed() -> TestResult {
+        // `events` is a recognized target base key: combining it with a
+        // platform-variant sub-table must not trip `InvalidPlatformVariant`,
+        // and (like `depends_on`) it round-trips through the base-key path
+        // when no variant matches the host.
+        let toml = "[target.foo]\nevents = false\n\
+                    [[target.foo.linux.command]]\nname = \"l\"\ncmd = [\"true\"]\n\
+                    [[target.foo.command]]\nname = \"d\"\ncmd = [\"true\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &macos_host())?;
+        let foo = rf.target("foo").ok_or("expected 'foo'")?;
+        assert!(!foo.events);
+        Ok(())
+    }
+
+    #[test]
+    fn platform_variant_time_tracking_key_allowed() -> TestResult {
+        // `time_tracking` is a recognized target base key: combining it with
+        // a platform-variant sub-table must not trip `InvalidPlatformVariant`,
+        // and (like `events`) it round-trips through the base-key path when
+        // no variant matches the host.
+        let toml = "[target.foo]\ntime_tracking = false\n\
+                    [[target.foo.linux.command]]\nname = \"l\"\ncmd = [\"true\"]\n\
+                    [[target.foo.command]]\nname = \"d\"\ncmd = [\"true\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &macos_host())?;
+        let foo = rf.target("foo").ok_or("expected 'foo'")?;
+        assert!(!foo.time_tracking);
+        Ok(())
     }
 
     #[test]

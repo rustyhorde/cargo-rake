@@ -41,6 +41,7 @@ cmd = ["cargo", "--version"]
 
 [target.build]
 depends_on = ["extra"]
+time_tracking = false
 
 [[target.build.command]]
 name = "compile"
@@ -49,6 +50,13 @@ cmd = ["cargo", "--version"]
 [[target.build.command]]
 name = "winonly"
 platform = ["{other_platform}"]
+cmd = ["cargo", "--version"]
+
+[target.quiet]
+events = false
+
+[[target.quiet.command]]
+name = "quiet-cmd"
 cmd = ["cargo", "--version"]
 
 [lifecycle]
@@ -66,7 +74,7 @@ address = "{addr}"
         expires_at: None,
         issued_at: Utc::now(),
     };
-    let report = rakefile.run_licensed(&["build", "^extra"], Some(&license))?;
+    let report = rakefile.run_licensed(&["build", "^extra", "quiet"], Some(&license))?;
     assert!(report.status.is_some_and(|s| s.success()));
 
     let mut events = Vec::new();
@@ -108,6 +116,19 @@ address = "{addr}"
     assert!(tags.contains(&"after_target"));
     assert!(tags.contains(&"before_command"));
     assert!(tags.contains(&"after_command"));
+    assert!(tags.contains(&"no_time_tracking"), "tags: {tags:?}");
+
+    // "build" opts out of time tracking: its `no_time_tracking` event must
+    // appear immediately after its `before_target` event.
+    let build_before_target_idx = events
+        .iter()
+        .position(|v| v["event"] == "before_target" && v["target"] == "build")
+        .ok_or("expected a before_target event for 'build'")?;
+    let no_time_tracking = events
+        .get(build_before_target_idx + 1)
+        .ok_or("expected an event after build's before_target")?;
+    assert_eq!(no_time_tracking["event"], "no_time_tracking");
+    assert_eq!(no_time_tracking["target"], "build");
 
     let skipped_target = events
         .iter()
@@ -124,6 +145,17 @@ address = "{addr}"
         skipped_command["reason"]
             .as_str()
             .is_some_and(|r| r.contains(other_platform))
+    );
+
+    // The "quiet" target opts out of events entirely: neither its own
+    // before/after events nor its command's events should appear anywhere
+    // in the captured stream, even though the run is otherwise licensed and
+    // configured for events.
+    let quiet_events: Vec<&serde_json::Value> =
+        events.iter().filter(|v| v["target"] == "quiet").collect();
+    assert!(
+        quiet_events.is_empty(),
+        "expected no events for target 'quiet', got {quiet_events:?}"
     );
 
     Ok(())

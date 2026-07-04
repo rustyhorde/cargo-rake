@@ -395,6 +395,9 @@ pub fn list_targets(rakefile: &Rakefile) -> String {
         if !target.events {
             let _ = writeln!(out, "    events: false");
         }
+        if !target.time_tracking {
+            let _ = writeln!(out, "    time_tracking: false");
+        }
         for command in &target.commands {
             let mut marker = String::new();
             if let Some(platforms) = &command.platform {

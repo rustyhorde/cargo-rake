@@ -366,6 +366,7 @@ mod tests {
             skip_deps: skip_deps.iter().map(|s| (*s).to_string()).collect(),
             tools: Vec::new(),
             events: true,
+            time_tracking: true,
         }
     }
 

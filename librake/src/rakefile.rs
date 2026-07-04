@@ -180,7 +180,8 @@ const KNOWN_FAMILY: &[&str] = &["unix", "windows", "wasm"];
 /// Keys that may appear directly in a `[target.X]` table as base fields.
 /// Any other key must be a recognized platform/family token (a variant sub-table)
 /// or it is rejected with [`Error::InvalidPlatformVariant`].
-const KNOWN_TARGET_BASE_KEYS: &[&str] = &["command", "depends_on", "tools", "events"];
+const KNOWN_TARGET_BASE_KEYS: &[&str] =
+    &["command", "depends_on", "tools", "events", "time_tracking"];
 
 /// Recognized architecture tokens for a command's `arch` list (the stable
 /// `target_arch` values [`std::env::consts::ARCH`] can report).
@@ -457,6 +458,13 @@ pub struct Target {
     /// regardless of that gating.
     #[serde(default = "default_true")]
     pub events: bool,
+    /// Whether this target participates in time tracking. Defaults to
+    /// `true`. Set `false` to have a `no_time_tracking` lifecycle event
+    /// fire immediately after this target's `before_target` event (still
+    /// subject to the same `events`/license/`[lifecycle]` gating as every
+    /// other event).
+    #[serde(default = "default_true")]
+    pub time_tracking: bool,
 }
 
 fn default_true() -> bool {
@@ -1247,6 +1255,13 @@ impl Rakefile {
                         ts: Utc::now(),
                         target: (*name).to_string(),
                     });
+                    if !target.time_tracking {
+                        target_emitter.emit(&LifecycleEvent::NoTimeTracking {
+                            run_id: target_emitter.run_id().to_string(),
+                            ts: Utc::now(),
+                            target: (*name).to_string(),
+                        });
+                    }
                     let target_start = Instant::now();
                     let (current, stop) = run_one(
                         name,
@@ -2092,6 +2107,38 @@ cmd = ["cargo", "doc"]
             .ok_or("expected a build target")?
             .events;
         assert!(events);
+        Ok(())
+    }
+
+    #[test]
+    fn target_time_tracking_defaults_to_true() -> TestResult {
+        let build = Rakefile::from_toml_str(SAMPLE)?
+            .target("build")
+            .ok_or("expected a build target")?
+            .time_tracking;
+        assert!(build);
+        Ok(())
+    }
+
+    #[test]
+    fn target_time_tracking_false_is_respected() -> TestResult {
+        let src = format!("[target.build]\ntime_tracking = false\n{SAMPLE}");
+        let time_tracking = Rakefile::from_toml_str(&src)?
+            .target("build")
+            .ok_or("expected a build target")?
+            .time_tracking;
+        assert!(!time_tracking);
+        Ok(())
+    }
+
+    #[test]
+    fn target_time_tracking_true_explicit_round_trips() -> TestResult {
+        let src = format!("[target.build]\ntime_tracking = true\n{SAMPLE}");
+        let time_tracking = Rakefile::from_toml_str(&src)?
+            .target("build")
+            .ok_or("expected a build target")?
+            .time_tracking;
+        assert!(time_tracking);
         Ok(())
     }
 
@@ -3232,6 +3279,21 @@ cmd = ["cargo", "doc"]
         let rf = Rakefile::from_toml_str_with_host(toml, &macos_host())?;
         let foo = rf.target("foo").ok_or("expected 'foo'")?;
         assert!(!foo.events);
+        Ok(())
+    }
+
+    #[test]
+    fn platform_variant_time_tracking_key_allowed() -> TestResult {
+        // `time_tracking` is a recognized target base key: combining it with
+        // a platform-variant sub-table must not trip `InvalidPlatformVariant`,
+        // and (like `events`) it round-trips through the base-key path when
+        // no variant matches the host.
+        let toml = "[target.foo]\ntime_tracking = false\n\
+                    [[target.foo.linux.command]]\nname = \"l\"\ncmd = [\"true\"]\n\
+                    [[target.foo.command]]\nname = \"d\"\ncmd = [\"true\"]\n";
+        let rf = Rakefile::from_toml_str_with_host(toml, &macos_host())?;
+        let foo = rf.target("foo").ok_or("expected 'foo'")?;
+        assert!(!foo.time_tracking);
         Ok(())
     }
 

@@ -20,7 +20,10 @@
 #                          # a quiet no-op.
 #     address = "..."      # REQUIRED (within the table). A `host:port` UDP
 #                          # socket address events are sent to, fire-and-forget
-#                          # (nobody needing to listen is fine).
+#                          # (nobody needing to listen is fine). Also accepts
+#                          # an array of addresses (e.g. ["127.0.0.1:9999",
+#                          # "10.0.0.127:9999"]) to send every event to more
+#                          # than one destination at once.
 #
 #   [tool.cargo.<name>]    # OPTIONAL table of cargo-installable tools (cargo
 #                          # subcommands, etc.) that targets reference by name.
@@ -89,7 +92,7 @@
 # ---------------------------------------------------------------------------
 
 [lifecycle]
-address = "127.0.0.1:9999"
+address = ["127.0.0.1:9999", "10.0.0.127:9999"]
 
 # ---------------------------------------------------------------------------
 # tools

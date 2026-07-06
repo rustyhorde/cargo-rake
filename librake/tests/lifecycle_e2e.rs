@@ -162,6 +162,60 @@ address = "{addr}"
 }
 
 #[test]
+fn licensed_run_sends_events_to_every_configured_address() -> TestResult {
+    let listener_a = UdpSocket::bind("127.0.0.1:0")?;
+    let listener_b = UdpSocket::bind("127.0.0.1:0")?;
+    listener_a.set_read_timeout(Some(Duration::from_secs(2)))?;
+    listener_b.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let addr_a = listener_a.local_addr()?;
+    let addr_b = listener_b.local_addr()?;
+
+    let toml = format!(
+        r#"
+[[target.build.command]]
+name = "compile"
+cmd = ["cargo", "--version"]
+
+[lifecycle]
+address = ["{addr_a}", "{addr_b}"]
+"#
+    );
+
+    let rakefile = Rakefile::from_toml_str(&toml)?;
+    let license = LicensePayload {
+        licensee: "test@example.com".to_string(),
+        features: Features {
+            basic: false,
+            events: true,
+        },
+        expires_at: None,
+        issued_at: Utc::now(),
+    };
+    let report = rakefile.run_licensed(&["build"], Some(&license))?;
+    assert!(report.status.is_some_and(|s| s.success()));
+
+    for listener in [&listener_a, &listener_b] {
+        let mut tags = Vec::new();
+        loop {
+            let mut buf = [0u8; 4096];
+            match listener.recv(&mut buf) {
+                Ok(n) => {
+                    let value: serde_json::Value = serde_json::from_slice(&buf[..n])?;
+                    if let Some(tag) = value["event"].as_str() {
+                        tags.push(tag.to_string());
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        assert_eq!(tags.first().map(String::as_str), Some("before_all"));
+        assert_eq!(tags.last().map(String::as_str), Some("after_all"));
+    }
+
+    Ok(())
+}
+
+#[test]
 fn unlicensed_run_emits_no_events() -> TestResult {
     let listener = UdpSocket::bind("127.0.0.1:0")?;
     listener.set_read_timeout(Some(Duration::from_millis(300)))?;

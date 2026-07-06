@@ -362,6 +362,10 @@ pub enum Error {
         /// The offending `address` value.
         value: String,
     },
+    /// The `[lifecycle]` table's `address` was an empty array, which would
+    /// leave lifecycle events configured but with nowhere to send them.
+    #[error("'[lifecycle] address' is an empty list (set a single address, or list at least one)")]
+    EmptyLifecycleAddresses,
     /// A license key string is not in the expected format, or its encoding or
     /// cryptographic bytes are invalid.
     #[error("license key is malformed")]

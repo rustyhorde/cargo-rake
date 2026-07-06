@@ -16,8 +16,8 @@
 //! on startup and installs it automatically; see [`ensure_self_update`] and
 //! [`Rakefile::update`]. An optional top-level `[lifecycle]` table (an
 //! `address` of the form `host:port`) enables before/after lifecycle events
-//! — sent fire-and-forget as JSON over a loopback UDP socket for the whole
-//! run, each target, each command, and each tool check/install/update — but
+//! — sent fire-and-forget as JSON over UDP for the whole run, each target,
+//! each command, and each tool check/install/update — but
 //! only when the run is also licensed for the `events` feature (see
 //! [`Rakefile::run_licensed`]); absent or unlicensed is a quiet no-op.
 

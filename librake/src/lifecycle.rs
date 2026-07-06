@@ -1,6 +1,5 @@
 //! License-gated lifecycle events: a fire-and-forget, best-effort JSON event
-//! stream sent over a loopback UDP socket so external tooling can observe a
-//! run as it happens.
+//! stream sent over UDP so external tooling can observe a run as it happens.
 //!
 //! Every [`Emitter::emit`] call is unconditional at the call site — a
 //! disabled emitter (unlicensed, or no `[lifecycle]` table configured) is a
@@ -262,9 +261,9 @@ pub(crate) trait Sink {
     fn send(&self, bytes: &[u8]);
 }
 
-/// Sends events over a loopback UDP socket. `send_to` does not block waiting
-/// for a listener, and a datagram sent to an address with nobody listening is
-/// silently dropped by the OS — exactly the desired fire-and-forget contract.
+/// Sends events over UDP. `send_to` does not block waiting for a listener,
+/// and a datagram sent to an address with nobody listening is silently
+/// dropped by the OS — exactly the desired fire-and-forget contract.
 struct UdpSink {
     socket: UdpSocket,
     target: SocketAddr,
@@ -300,16 +299,17 @@ impl Emitter {
         }
     }
 
-    /// Build a live emitter bound to an ephemeral local port, sending to
-    /// `target`. A bind failure (e.g. no loopback interface available) falls
-    /// back to [`disabled`](Self::disabled) rather than failing the run —
-    /// lifecycle events are an observability side channel, never a required
-    /// one.
+    /// Build a live emitter bound to an ephemeral local port on all
+    /// interfaces, sending to `target` (which may be a loopback or a remote
+    /// address). A bind failure (e.g. no usable network interface available)
+    /// falls back to [`disabled`](Self::disabled) rather than failing the
+    /// run — lifecycle events are an observability side channel, never a
+    /// required one.
     pub(crate) fn new(target: SocketAddr) -> Self {
         let bind_addr: SocketAddr = if target.is_ipv6() {
-            (std::net::Ipv6Addr::LOCALHOST, 0).into()
+            (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
         } else {
-            (std::net::Ipv4Addr::LOCALHOST, 0).into()
+            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
         };
         match UdpSocket::bind(bind_addr) {
             Ok(socket) => Self {

@@ -269,14 +269,45 @@ struct UdpSink {
     target: SocketAddr,
 }
 
+impl UdpSink {
+    /// Bind an outbound socket matching `target`'s address family and wrap
+    /// it as a sink for that one destination. `None` on a bind failure (e.g.
+    /// no usable network interface) — the caller drops this destination
+    /// rather than failing the whole run.
+    fn bind(target: SocketAddr) -> Option<Box<dyn Sink>> {
+        let bind_addr: SocketAddr = if target.is_ipv6() {
+            (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+        } else {
+            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+        };
+        let socket = UdpSocket::bind(bind_addr).ok()?;
+        let sink: Box<dyn Sink> = Box::new(Self { socket, target });
+        Some(sink)
+    }
+}
+
 impl Sink for UdpSink {
     fn send(&self, bytes: &[u8]) {
         let _ = self.socket.send_to(bytes, self.target).ok();
     }
 }
 
+/// Fans a send out to every held sink — used when `[lifecycle]` configures
+/// more than one destination address, so e.g. a loopback owner and a LAN
+/// listener can both receive the same event stream.
+struct MultiSink(Vec<Box<dyn Sink>>);
+
+impl Sink for MultiSink {
+    fn send(&self, bytes: &[u8]) {
+        for sink in &self.0 {
+            sink.send(bytes);
+        }
+    }
+}
+
 /// The disabled sink: every event is silently dropped. Used when lifecycle
-/// events are unlicensed, unconfigured, or the socket could not be bound.
+/// events are unlicensed, unconfigured, or no destination's socket could be
+/// bound.
 struct NullSink;
 
 impl Sink for NullSink {
@@ -299,24 +330,22 @@ impl Emitter {
         }
     }
 
-    /// Build a live emitter bound to an ephemeral local port on all
-    /// interfaces, sending to `target` (which may be a loopback or a remote
-    /// address). A bind failure (e.g. no usable network interface available)
-    /// falls back to [`disabled`](Self::disabled) rather than failing the
-    /// run — lifecycle events are an observability side channel, never a
-    /// required one.
-    pub(crate) fn new(target: SocketAddr) -> Self {
-        let bind_addr: SocketAddr = if target.is_ipv6() {
-            (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
-        } else {
-            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
-        };
-        match UdpSocket::bind(bind_addr) {
-            Ok(socket) => Self {
-                sink: Box::new(UdpSink { socket, target }),
-                run_id: generate_run_id(),
-            },
-            Err(_) => Self::disabled(),
+    /// Build a live emitter that sends every event to each of `targets`
+    /// (each may be a loopback or a remote address), via one dedicated
+    /// outbound socket per destination bound to an ephemeral local port. A
+    /// destination whose socket fails to bind (e.g. no usable network
+    /// interface for that address family) is dropped rather than failing the
+    /// run; if none bind, falls back to [`disabled`](Self::disabled) —
+    /// lifecycle events are an observability side channel, never a required
+    /// one.
+    pub(crate) fn new(targets: Vec<SocketAddr>) -> Self {
+        let sinks: Vec<Box<dyn Sink>> = targets.into_iter().filter_map(UdpSink::bind).collect();
+        if sinks.is_empty() {
+            return Self::disabled();
+        }
+        Self {
+            sink: Box::new(MultiSink(sinks)),
+            run_id: generate_run_id(),
         }
     }
 
@@ -358,7 +387,9 @@ fn generate_run_id() -> String {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+    use std::net::UdpSocket;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use super::{Emitter, LifecycleEvent, ProjectInfo, Sink, ToolOutcome};
     use crate::tool::UpdateRecord;
@@ -413,6 +444,46 @@ mod tests {
         let emitter = Emitter::disabled();
         assert_eq!(emitter.run_id(), emitter.run_id());
         assert!(!emitter.run_id().is_empty());
+    }
+
+    #[test]
+    fn new_with_no_targets_behaves_like_disabled() {
+        let emitter = Emitter::new(Vec::new());
+        // No observable effect beyond "does not panic" — an empty target
+        // list collects zero sinks, so `new` falls back to `disabled()`.
+        emitter.emit(&LifecycleEvent::BeforeAll {
+            run_id: emitter.run_id().to_string(),
+            ts: chrono::Utc::now(),
+            roots: vec!["default".to_string()],
+            target_count: 1,
+            project: ProjectInfo::detect(),
+        });
+    }
+
+    #[test]
+    fn new_sends_every_event_to_every_target() -> Result<(), Box<dyn Error>> {
+        let listener_a = UdpSocket::bind("127.0.0.1:0")?;
+        let listener_b = UdpSocket::bind("127.0.0.1:0")?;
+        listener_a.set_read_timeout(Some(Duration::from_secs(2)))?;
+        listener_b.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let addr_a = listener_a.local_addr()?;
+        let addr_b = listener_b.local_addr()?;
+
+        let emitter = Emitter::new(vec![addr_a, addr_b]);
+        emitter.emit(&LifecycleEvent::BeforeTarget {
+            run_id: "abc-123".to_string(),
+            ts: chrono::Utc::now(),
+            target: "build".to_string(),
+        });
+
+        for listener in [&listener_a, &listener_b] {
+            let mut buf = [0_u8; 4096];
+            let len = listener.recv(&mut buf)?;
+            let value: serde_json::Value = serde_json::from_slice(&buf[..len])?;
+            assert_eq!(value["event"], "before_target");
+            assert_eq!(value["target"], "build");
+        }
+        Ok(())
     }
 
     #[test]

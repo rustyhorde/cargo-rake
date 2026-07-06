@@ -510,13 +510,36 @@ pub struct Rakefile {
 /// feature. See the [`crate`]-level docs and [`Rakefile::run_licensed`].
 #[derive(Debug, Deserialize)]
 pub(crate) struct LifecycleConfig {
-    /// A `host:port` UDP socket address, e.g. `"127.0.0.1:9999"`, that events
-    /// are sent to (fire-and-forget; nobody needing to listen is fine).
-    address: String,
+    /// One or more `host:port` UDP socket addresses, e.g. `"127.0.0.1:9999"`
+    /// or `["127.0.0.1:9999", "10.0.0.127:9999"]`, that events are sent to
+    /// (fire-and-forget; nobody needing to listen is fine).
+    address: LifecycleAddress,
     /// `address` parsed once at validation time, so `run_impl` never
-    /// re-parses (or re-fails on) a string it has already validated.
+    /// re-parses (or re-fails on) strings it has already validated.
     #[serde(skip)]
-    resolved_address: Option<SocketAddr>,
+    resolved_addresses: Vec<SocketAddr>,
+}
+
+/// The `[lifecycle]` table's `address` key: a single destination (the common
+/// case) or an array of destinations to fan events out to more than one
+/// listener at once.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LifecycleAddress {
+    /// A single `host:port` string.
+    One(String),
+    /// Multiple `host:port` strings.
+    Many(Vec<String>),
+}
+
+impl LifecycleAddress {
+    /// Every configured address string, in declaration order.
+    fn values(&self) -> Vec<&str> {
+        match self {
+            Self::One(value) => vec![value.as_str()],
+            Self::Many(values) => values.iter().map(String::as_str).collect(),
+        }
+    }
 }
 
 /// The outcome of running a target: the exit status of the last command that
@@ -724,7 +747,8 @@ impl Rakefile {
     /// Every target must define at least one command or dependency, each
     /// command's `cmd` must be non-empty, the `toolchain` must be a single
     /// non-empty token, the `[lifecycle]` table's `address` (if present) must
-    /// parse as a socket address, and the dependency graph must be valid (no
+    /// be non-empty and every entry must parse as a socket address, and the
+    /// dependency graph must be valid (no
     /// unknown dependencies, no cycles).
     fn validate(&mut self) -> Result<()> {
         // When declared, the channel must be a single clean token, so it can be
@@ -737,12 +761,21 @@ impl Rakefile {
             });
         }
         if let Some(lifecycle) = &mut self.lifecycle {
-            let addr = lifecycle.address.parse::<SocketAddr>().map_err(|_| {
-                Error::InvalidLifecycleAddress {
-                    value: lifecycle.address.clone(),
-                }
-            })?;
-            lifecycle.resolved_address = Some(addr);
+            let values = lifecycle.address.values();
+            if values.is_empty() {
+                return Err(Error::EmptyLifecycleAddresses);
+            }
+            let mut resolved = Vec::with_capacity(values.len());
+            for value in values {
+                let addr =
+                    value
+                        .parse::<SocketAddr>()
+                        .map_err(|_| Error::InvalidLifecycleAddress {
+                            value: value.to_string(),
+                        })?;
+                resolved.push(addr);
+            }
+            lifecycle.resolved_addresses = resolved;
         }
         for (name, target) in &self.targets {
             if target.commands.is_empty() && target.depends_on.is_empty() {
@@ -1138,9 +1171,13 @@ impl Rakefile {
         // and a `[lifecycle]` table with no license for `events` warns once
         // and behaves exactly like an absent one — never a hard error.
         let emitter = match (&self.lifecycle, license) {
-            (Some(cfg), Some(payload)) if !dry_run && payload.features.events => cfg
-                .resolved_address
-                .map_or_else(Emitter::disabled, Emitter::new),
+            (Some(cfg), Some(payload)) if !dry_run && payload.features.events => {
+                if cfg.resolved_addresses.is_empty() {
+                    Emitter::disabled()
+                } else {
+                    Emitter::new(cfg.resolved_addresses.clone())
+                }
+            }
             (Some(_), _) if !dry_run => {
                 print_label(
                     "Warning",
@@ -2170,6 +2207,55 @@ cmd = ["cargo", "doc"]
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn lifecycle_address_single_string_resolves_to_one_address() -> TestResult {
+        let src = format!("[lifecycle]\naddress = \"127.0.0.1:9999\"\n{SAMPLE}");
+        let rakefile = Rakefile::from_toml_str(&src)?;
+        let lifecycle = rakefile.lifecycle.ok_or("expected a [lifecycle] table")?;
+        assert_eq!(
+            lifecycle.resolved_addresses,
+            vec!["127.0.0.1:9999".parse::<std::net::SocketAddr>()?]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_address_array_resolves_to_every_address() -> TestResult {
+        let src =
+            format!("[lifecycle]\naddress = [\"127.0.0.1:9999\", \"10.0.0.127:9999\"]\n{SAMPLE}");
+        let rakefile = Rakefile::from_toml_str(&src)?;
+        let lifecycle = rakefile.lifecycle.ok_or("expected a [lifecycle] table")?;
+        assert_eq!(
+            lifecycle.resolved_addresses,
+            vec![
+                "127.0.0.1:9999".parse::<std::net::SocketAddr>()?,
+                "10.0.0.127:9999".parse::<std::net::SocketAddr>()?,
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_lifecycle_address_array_is_rejected() -> TestResult {
+        let src = format!("[lifecycle]\naddress = []\n{SAMPLE}");
+        match Rakefile::from_toml_str(&src) {
+            Err(Error::EmptyLifecycleAddresses) => Ok(()),
+            other => Err(format!("expected EmptyLifecycleAddresses, got {other:?}").into()),
+        }
+    }
+
+    #[test]
+    fn invalid_entry_in_lifecycle_address_array_is_rejected() -> TestResult {
+        let src = format!("[lifecycle]\naddress = [\"127.0.0.1:9999\", \"not-an-addr\"]\n{SAMPLE}");
+        match Rakefile::from_toml_str(&src) {
+            Err(Error::InvalidLifecycleAddress { value }) => {
+                assert_eq!(value, "not-an-addr");
+                Ok(())
+            }
+            other => Err(format!("expected InvalidLifecycleAddress, got {other:?}").into()),
+        }
     }
 
     #[test]

@@ -893,8 +893,8 @@ impl Rakefile {
     /// Like [`run`](Self::run) but license-aware: when this Rakefile's
     /// `[lifecycle]` table is present *and* `license` grants the `events`
     /// feature, before/after lifecycle events are sent (fire-and-forget, as
-    /// JSON over a loopback UDP socket) for the whole run, each target, each
-    /// command, and each tool check/install/update. Pass `None` for an
+    /// JSON over UDP) for the whole run, each target, each command, and each
+    /// tool check/install/update. Pass `None` for an
     /// unlicensed run — identical to calling [`run`](Self::run). When
     /// `[lifecycle]` is configured but `license` does not grant `events`, a
     /// one-line warning is printed and the run proceeds exactly as

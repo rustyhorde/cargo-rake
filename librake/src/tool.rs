@@ -55,8 +55,8 @@ pub(crate) const FISH_TAG: &str = "fish";
 
 /// A tool install or version update that occurred during a run.
 ///
-/// Collected by the run machinery and returned in [`RunReport::updates`]; the
-/// binaries print a consolidated summary after the final `Runtime` line.
+/// Collected by the run machinery and returned in [`crate::RunReport::updates`];
+/// the binaries print a consolidated summary after the final `Runtime` line.
 #[derive(Debug, Clone)]
 pub struct UpdateRecord {
     /// The tool's name (e.g. `"cargo-nextest"` or `"cargo-rake"` for the
@@ -77,7 +77,7 @@ pub struct UpdateRecord {
 /// `[tool.fish.<name>]` entries into [`fish`](ToolTable::fish). All three
 /// categories share one flat reference namespace (a target's `tools` names
 /// resolve against all of them), so a name must not appear in more than one —
-/// [`validate`] rejects that.
+/// `validate` rejects that.
 #[derive(Debug, Default, Deserialize)]
 pub struct ToolTable {
     /// Cargo-installable tools, declared under `[tool.cargo.<name>]`.
@@ -752,7 +752,7 @@ fn parse_version_token(stdout: &str) -> Option<Version> {
 }
 
 /// Print a blank separator followed by one `Updated` or `Installed` status
-/// line per [`UpdateRecord`], using [`print_label`] so the labels align in the
+/// line per [`UpdateRecord`], using `print_label` so the labels align in the
 /// shared status column. Does nothing when `updates` is empty.
 pub fn print_update_summary(updates: &[UpdateRecord]) {
     if updates.is_empty() {

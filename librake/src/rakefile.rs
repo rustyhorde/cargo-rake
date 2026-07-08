@@ -450,8 +450,8 @@ pub struct Target {
     /// commands run.
     #[serde(default)]
     pub tools: Vec<String>,
-    /// Whether this target participates in lifecycle events (see
-    /// [`crate::lifecycle`]). Defaults to `true` (current behavior): events
+    /// Whether this target participates in lifecycle events (see the
+    /// `lifecycle` module). Defaults to `true` (current behavior): events
     /// still require a top-level `[lifecycle]` table and the `events`
     /// license feature. Set `false` to have this target — and its
     /// commands' and tools' before/after/skip events — never fire,
@@ -1929,8 +1929,8 @@ fn decimal(value: u128, unit: u128) -> String {
 
 /// Format `elapsed` with microsecond precision, promoting the unit as the value
 /// grows: `µs`, then `ms`, then `s`, then composite `min`/`s` at the top tier.
-/// Every tier carries exactly [`FRAC_DIGITS`] digits after the decimal,
-/// zero-padded, with the integer part space-padded to [`INT_WIDTH`], e.g.
+/// Every tier carries exactly `FRAC_DIGITS` digits after the decimal,
+/// zero-padded, with the integer part space-padded to `INT_WIDTH`, e.g.
 /// ` 523.00000 µs`, `   1.01000 ms`, `   1.50100 s`, `1 min   30.50000 s`.
 ///
 /// # Examples
@@ -1960,7 +1960,7 @@ pub fn format_duration(elapsed: Duration) -> String {
     }
 }
 
-/// Print `label` (right-justified into the shared [`LABEL_WIDTH`] column,
+/// Print `label` (right-justified into the shared `LABEL_WIDTH` column,
 /// bold-green when stderr is a TTY and `NO_COLOR` is unset) followed by the
 /// [`format_duration`] rendering of `elapsed`. Justifying to the shared width
 /// lines the times up with the command/tool status lines and across the

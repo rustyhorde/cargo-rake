@@ -208,7 +208,7 @@ cmd = ["cargo", "matrix", "nextest", "run"]
 # docs
 # ---------------------------------------------------------------------------
 
-[[target.doc_test.command]]
+[[target.test.command]]
 name = "doc test"
 cmd = ["cargo", "matrix", "test", "--doc", "-p", "librake"]
 

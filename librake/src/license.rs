@@ -46,7 +46,7 @@ pub struct Features {
     /// The `basic` gated feature, demonstrated via `rake basic` / `cargo rake basic`.
     pub basic: bool,
     /// The `events` gated feature, unlocking lifecycle-event emission (see
-    /// [`crate::lifecycle`]) via a Rakefile's `[lifecycle]` table.
+    /// the `lifecycle` module) via a Rakefile's `[lifecycle]` table.
     ///
     /// `#[serde(default)]` so a license issued before this field existed
     /// still deserializes (defaulting to locked) rather than failing.

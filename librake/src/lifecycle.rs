@@ -7,6 +7,7 @@
 //! `run_one` never need to branch on whether events are enabled.
 
 use std::net::{SocketAddr, UdpSocket};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
@@ -208,6 +209,14 @@ pub struct ProjectInfo {
     /// The checked-out commit's full SHA, `None` outside a git working tree
     /// or without a `git` binary on `PATH`.
     pub git_sha: Option<String>,
+    /// A stable identifier for the sending machine, independent of network
+    /// address — the OS hostname when available, otherwise a randomly
+    /// generated name that's persisted to disk so it stays stable across
+    /// runs. `None` only when both hostname lookup and the on-disk fallback
+    /// fail. Exists so consumers (like `rakemon`) can tell apart multiple
+    /// senders that share one NAT'd source IP (e.g. several WSL instances on
+    /// the same Windows host).
+    pub client_id: Option<String>,
 }
 
 impl ProjectInfo {
@@ -221,8 +230,48 @@ impl ProjectInfo {
                 .map(|p| p.display().to_string()),
             git_branch: run_git(&["rev-parse", "--abbrev-ref", "HEAD"]),
             git_sha: run_git(&["rev-parse", "HEAD"]),
+            client_id: resolve_client_id(),
         }
     }
+}
+
+/// Resolve a stable per-machine identifier: the OS hostname when it's
+/// available and valid UTF-8, otherwise a persisted random name (generated
+/// once and reused from then on, so it doesn't change every run). Never
+/// fails the caller — any I/O or lookup error just leaves later fallbacks in
+/// play, and ultimately yields `None`.
+fn resolve_client_id() -> Option<String> {
+    if let Some(hostname) = gethostname::gethostname().to_str().map(str::to_owned)
+        && !hostname.is_empty()
+    {
+        return Some(hostname);
+    }
+    persisted_fallback_client_id()
+}
+
+/// The on-disk path for the generated fallback client id, alongside the
+/// existing license file (`license.rs`'s `license_file_path`).
+fn fallback_client_id_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("rake").join("client_id"))
+}
+
+/// Read the persisted fallback name, generating and persisting a new one
+/// (two words, e.g. `"brave-otter"`) the first time this machine needs it.
+fn persisted_fallback_client_id() -> Option<String> {
+    let path = fallback_client_id_path()?;
+    if let Some(existing) = std::fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(existing);
+    }
+    let generated = petname::petname(2, "-")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    std::fs::write(&path, &generated).ok()?;
+    Some(generated)
 }
 
 /// Run `git <args>` and return trimmed stdout on success, `None` on any

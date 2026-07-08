@@ -110,6 +110,10 @@ address = "{addr}"
         before_all.get("git_sha").is_some(),
         "expected git_sha key in {before_all}"
     );
+    assert!(
+        before_all.get("client_id").is_some(),
+        "expected client_id key in {before_all}"
+    );
     assert!(tags.contains(&"target_skipped"), "tags: {tags:?}");
     assert!(tags.contains(&"command_skipped"), "tags: {tags:?}");
     assert!(tags.contains(&"before_target"));

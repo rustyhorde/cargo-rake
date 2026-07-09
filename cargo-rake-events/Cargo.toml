@@ -5,7 +5,7 @@ license = "MIT OR Apache-2.0"
 name = "cargo-rake-events"
 publish = false
 rust-version = "1.95.0"
-version = "0.5.4"
+version = "0.6.0"
 
 [features]
 unstable = []

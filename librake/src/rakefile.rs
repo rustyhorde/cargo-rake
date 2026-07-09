@@ -450,8 +450,8 @@ pub struct Target {
     /// commands run.
     #[serde(default)]
     pub tools: Vec<String>,
-    /// Whether this target participates in lifecycle events (see
-    /// [`crate::lifecycle`]). Defaults to `true` (current behavior): events
+    /// Whether this target participates in lifecycle events (see the
+    /// `lifecycle` module). Defaults to `true` (current behavior): events
     /// still require a top-level `[lifecycle]` table and the `events`
     /// license feature. Set `false` to have this target — and its
     /// commands' and tools' before/after/skip events — never fire,
@@ -562,9 +562,20 @@ pub struct RunReport {
 impl Rakefile {
     /// Load and validate a `Rakefile.toml` from `path`.
     ///
+    /// If an optional `.rake/config.toml` exists relative to the current
+    /// working directory (independent of `path`), it is merged onto the
+    /// base `Rakefile.toml` using JSON-Merge-Patch semantics before
+    /// validation: TOML tables merge recursively key-by-key, while any
+    /// other value (a scalar or an array, including arrays of tables like
+    /// `[[target.build.command]]`) in the override completely replaces the
+    /// base value at that key. This layer is meant for personal, local
+    /// tweaks that can be excluded from source control.
+    ///
     /// # Errors
-    /// Returns [`Error::Io`] if `path` cannot be read, or any error from
-    /// [`Rakefile::from_toml_str`] if the contents are invalid.
+    /// Returns [`Error::Io`] if `path` (or, when present, `.rake/config.toml`,
+    /// or the current working directory) cannot be read, or any error from
+    /// [`Rakefile::from_toml_str`] if the (possibly merged) contents are
+    /// invalid.
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
         Self::from_path_with_host(path, &Host::detect())
     }
@@ -577,7 +588,13 @@ impl Rakefile {
     /// As [`from_path`](Self::from_path).
     pub fn from_path_with_host(path: impl AsRef<Path>, host: &Host) -> Result<Self> {
         let contents = std::fs::read_to_string(path)?;
-        Self::from_toml_str_with_host(&contents, host)
+        let raw: toml::Value = toml::from_str(&contents)?;
+        let cwd = std::env::current_dir()?;
+        let raw = match crate::local_config::load(&cwd)? {
+            Some(over) => crate::local_config::merge(raw, over),
+            None => raw,
+        };
+        Self::from_toml_value_with_host(raw, host)
     }
 
     /// Parse and validate a `Rakefile.toml` from a string using the current
@@ -719,6 +736,14 @@ impl Rakefile {
     /// ```
     pub fn from_toml_str_with_host(s: &str, host: &Host) -> Result<Self> {
         let raw: toml::Value = toml::from_str(s)?;
+        Self::from_toml_value_with_host(raw, host)
+    }
+
+    /// Shared tail of the parsing pipeline once a raw, possibly
+    /// locally-overridden `toml::Value` is in hand: resolve platform
+    /// variants, deserialize into the typed model, normalize `depends_on`,
+    /// and validate.
+    fn from_toml_value_with_host(raw: toml::Value, host: &Host) -> Result<Self> {
         let (resolved, excluded) = resolve_platform_variants(raw, host)?;
         let mut rakefile: Rakefile = Deserialize::deserialize(resolved)?;
         rakefile.excluded_targets = excluded;
@@ -1929,8 +1954,8 @@ fn decimal(value: u128, unit: u128) -> String {
 
 /// Format `elapsed` with microsecond precision, promoting the unit as the value
 /// grows: `µs`, then `ms`, then `s`, then composite `min`/`s` at the top tier.
-/// Every tier carries exactly [`FRAC_DIGITS`] digits after the decimal,
-/// zero-padded, with the integer part space-padded to [`INT_WIDTH`], e.g.
+/// Every tier carries exactly `FRAC_DIGITS` digits after the decimal,
+/// zero-padded, with the integer part space-padded to `INT_WIDTH`, e.g.
 /// ` 523.00000 µs`, `   1.01000 ms`, `   1.50100 s`, `1 min   30.50000 s`.
 ///
 /// # Examples
@@ -1960,7 +1985,7 @@ pub fn format_duration(elapsed: Duration) -> String {
     }
 }
 
-/// Print `label` (right-justified into the shared [`LABEL_WIDTH`] column,
+/// Print `label` (right-justified into the shared `LABEL_WIDTH` column,
 /// bold-green when stderr is a TTY and `NO_COLOR` is unset) followed by the
 /// [`format_duration`] rendering of `elapsed`. Justifying to the shared width
 /// lines the times up with the command/tool status lines and across the

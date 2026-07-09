@@ -392,6 +392,32 @@ graph runs in full in the order given. A target shared by two roots runs once pe
 root (no cross-root deduplication). Tools, however, are ensured at most once for
 the whole run regardless of how many roots reference them.
 
+### Local overrides (`.rake/config.toml`)
+
+An optional `.rake/config.toml`, resolved relative to the **current working
+directory** you invoke `rake`/`cargo rake` from (not relative to `--file`/`-f`,
+and not relative to wherever `Rakefile.toml` itself lives), lets you layer
+personal, machine-local tweaks on top of the shared `Rakefile.toml` — for
+example swapping a `toolchain` channel, pointing a tool's `check`/`install` at
+a local path, or disabling a command. It's meant to be excluded from source
+control (add `.rake/` to your `.gitignore`), not as a general multi-file
+config system.
+
+`.rake/config.toml` uses the exact same schema as `Rakefile.toml` and is
+merged onto it before validation using JSON-Merge-Patch-style semantics:
+
+- TOML **tables** merge recursively, key by key.
+- Any other value — a string, bool, number, or **array** (including an array
+  of tables like `[[target.build.command]]`) — completely **replaces** the
+  base value at that key, if the override sets that key at all.
+- A key the override doesn't mention is left untouched.
+
+Because arrays replace wholesale rather than merge element-by-element,
+overriding a single command means restating that target's whole `command`
+array in the override file — there's no partial-array or matching-by-name
+behavior. If `.rake/config.toml` is absent, nothing changes. `rake list` and
+`rake syntax` both reflect the merged, effective configuration.
+
 ## Usage
 
 ```bash

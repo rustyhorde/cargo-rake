@@ -33,6 +33,7 @@ toml = { workspace = true }
 ureq = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 
 [build-dependencies]
 anyhow = { workspace = true }

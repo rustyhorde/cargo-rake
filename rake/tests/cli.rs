@@ -8,6 +8,7 @@
 
 use std::error::Error;
 use std::fs;
+use std::path::Path;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -91,6 +92,59 @@ fn rake(dir: &TempDir) -> Result<Command, Box<dyn Error>> {
     let _ = cmd.arg("-f").arg(dir.path().join("Rakefile.toml"));
     Ok(cmd)
 }
+
+/// Write `.rake/config.toml` with `contents` under `dir`.
+fn local_config_dir(dir: &TempDir, contents: &str) -> Result<(), Box<dyn Error>> {
+    let rake_dir = dir.path().join(".rake");
+    fs::create_dir_all(&rake_dir)?;
+    fs::write(rake_dir.join("config.toml"), contents)?;
+    Ok(())
+}
+
+/// `rake -f <file_arg>` with the process cwd pinned to `dir`, so a
+/// `./.rake/config.toml` written under `dir` resolves as the local override
+/// regardless of where `file_arg` points.
+fn rake_with_cwd(dir: &TempDir, file_arg: impl AsRef<Path>) -> Result<Command, Box<dyn Error>> {
+    let mut cmd = Command::cargo_bin("rake")?;
+    let _ = cmd.current_dir(dir.path()).arg("-f").arg(file_arg.as_ref());
+    Ok(cmd)
+}
+
+/// A single-target Rakefile whose command output is later overridden by a
+/// `.rake/config.toml` local override in the tests below.
+#[cfg(not(windows))]
+const OVERRIDABLE: &str = r#"
+update = false
+
+[[target.greet.command]]
+name = "say"
+cmd = ["echo", "base value"]
+"#;
+
+#[cfg(windows)]
+const OVERRIDABLE: &str = r#"
+update = false
+
+[[target.greet.command]]
+name = "say"
+cmd = ["cmd", "/c", "echo", "base value"]
+"#;
+
+/// Replaces `greet`'s whole `command` array (JSON-Merge-Patch semantics
+/// replace arrays wholesale, so the override must restate it in full).
+#[cfg(not(windows))]
+const OVERRIDE_TOML: &str = r#"
+[[target.greet.command]]
+name = "say"
+cmd = ["echo", "override value"]
+"#;
+
+#[cfg(windows)]
+const OVERRIDE_TOML: &str = r#"
+[[target.greet.command]]
+name = "say"
+cmd = ["cmd", "/c", "echo", "override value"]
+"#;
 
 #[test]
 fn list_prints_targets() -> TestResult {
@@ -499,5 +553,81 @@ fn license_info_prints_status() -> TestResult {
         .stderr(
             predicate::str::contains("no license active").or(predicate::str::contains("Features")),
         );
+    Ok(())
+}
+
+#[test]
+fn local_config_overrides_command_in_same_directory() -> TestResult {
+    let dir = rakefile_dir(OVERRIDABLE)?;
+    local_config_dir(&dir, OVERRIDE_TOML)?;
+    rake_with_cwd(&dir, "Rakefile.toml")?
+        .arg("greet")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("override value"))
+        .stdout(predicate::str::contains("base value").not());
+    Ok(())
+}
+
+/// `.rake/config.toml` resolves relative to the process's current working
+/// directory, not relative to wherever `-f` points — so it still applies
+/// when the Rakefile lives in a subdirectory of the cwd.
+#[test]
+fn local_config_resolves_against_cwd_not_rakefile_dir() -> TestResult {
+    let dir = TempDir::new()?;
+    let project_dir = dir.path().join("project");
+    fs::create_dir_all(&project_dir)?;
+    fs::write(project_dir.join("Rakefile.toml"), OVERRIDABLE)?;
+    let rake_dir = dir.path().join(".rake");
+    fs::create_dir_all(&rake_dir)?;
+    fs::write(rake_dir.join("config.toml"), OVERRIDE_TOML)?;
+
+    let mut cmd = Command::cargo_bin("rake")?;
+    let _ = cmd
+        .current_dir(dir.path())
+        .arg("-f")
+        .arg("project/Rakefile.toml")
+        .arg("greet");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("override value"))
+        .stdout(predicate::str::contains("base value").not());
+    Ok(())
+}
+
+/// Negative control for the previous test: a `.rake/config.toml` sitting
+/// next to the Rakefile (not at the cwd) must NOT apply, proving resolution
+/// is cwd-relative rather than `-f`-relative.
+#[test]
+fn local_config_next_to_rakefile_is_ignored_when_cwd_differs() -> TestResult {
+    let dir = TempDir::new()?;
+    let project_dir = dir.path().join("project");
+    fs::create_dir_all(&project_dir)?;
+    fs::write(project_dir.join("Rakefile.toml"), OVERRIDABLE)?;
+    let rake_dir = project_dir.join(".rake");
+    fs::create_dir_all(&rake_dir)?;
+    fs::write(rake_dir.join("config.toml"), OVERRIDE_TOML)?;
+
+    let mut cmd = Command::cargo_bin("rake")?;
+    let _ = cmd
+        .current_dir(dir.path())
+        .arg("-f")
+        .arg("project/Rakefile.toml")
+        .arg("greet");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("base value"))
+        .stdout(predicate::str::contains("override value").not());
+    Ok(())
+}
+
+#[test]
+fn missing_local_config_is_a_silent_noop() -> TestResult {
+    let dir = rakefile_dir(OVERRIDABLE)?;
+    rake_with_cwd(&dir, "Rakefile.toml")?
+        .arg("greet")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("base value"));
     Ok(())
 }

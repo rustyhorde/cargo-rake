@@ -267,6 +267,7 @@ mod error;
 mod graph;
 mod license;
 mod lifecycle;
+mod local_config;
 mod rakefile;
 mod tool;
 mod toolchain;

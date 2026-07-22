@@ -269,6 +269,7 @@ mod license;
 mod lifecycle;
 mod local_config;
 mod rakefile;
+mod signal;
 mod tool;
 mod toolchain;
 

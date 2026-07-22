@@ -175,6 +175,24 @@ pub enum LifecycleEvent {
         /// Wall-clock time spent ensuring this tool.
         duration_ms: u64,
     },
+    /// The run was cancelled by a caught signal (Unix) or console control
+    /// event (Windows) before it finished. Deliberately does not name which
+    /// target/command was in-flight — a consumer already has that by
+    /// correlating `run_id` against the last unmatched `BeforeTarget`/
+    /// `BeforeCommand` in the ordered event stream.
+    Cancelled {
+        /// Identifier shared by every event emitted during this run.
+        run_id: String,
+        /// Wall-clock time the event was emitted.
+        ts: DateTime<Utc>,
+        /// The signal/event that triggered cancellation, e.g. `"SIGINT"`,
+        /// `"SIGTERM"`, `"SIGQUIT"` (Unix), or `"console-event"` (Windows —
+        /// its console-control handler cannot report which of the five
+        /// events fired).
+        signal: String,
+        /// Wall-clock time spent on the run before it was cancelled.
+        elapsed_ms: u64,
+    },
     /// A forward-compatibility catch-all: any `"event"` tag a consumer built
     /// against an older version of this enum doesn't recognize deserializes
     /// here instead of failing the datagram. Never constructed or emitted by
@@ -388,14 +406,24 @@ impl Emitter {
     /// lifecycle events are an observability side channel, never a required
     /// one.
     pub(crate) fn new(targets: Vec<SocketAddr>) -> Self {
+        Self::new_with_run_id(targets, generate_run_id())
+    }
+
+    /// Like [`new`](Self::new) but reusing an already-generated `run_id`
+    /// instead of minting a fresh one — used by the signal-cancellation
+    /// handler ([`crate::signal`]) to send a [`LifecycleEvent::Cancelled`]
+    /// that correlates with the run it's cancelling. Unlike `new`, an empty
+    /// `targets` list builds a [`NullSink`] directly rather than delegating
+    /// to [`disabled`](Self::disabled), which would mint a fresh `run_id`
+    /// and defeat the whole point.
+    pub(crate) fn new_with_run_id(targets: Vec<SocketAddr>, run_id: String) -> Self {
         let sinks: Vec<Box<dyn Sink>> = targets.into_iter().filter_map(UdpSink::bind).collect();
-        if sinks.is_empty() {
-            return Self::disabled();
-        }
-        Self {
-            sink: Box::new(MultiSink(sinks)),
-            run_id: generate_run_id(),
-        }
+        let sink: Box<dyn Sink> = if sinks.is_empty() {
+            Box::new(NullSink)
+        } else {
+            Box::new(MultiSink(sinks))
+        };
+        Self { sink, run_id }
     }
 
     /// Build an emitter around an arbitrary [`Sink`], for tests.
@@ -510,6 +538,12 @@ mod tests {
     }
 
     #[test]
+    fn new_with_run_id_reuses_given_run_id() {
+        let emitter = Emitter::new_with_run_id(Vec::new(), "abc-123".to_string());
+        assert_eq!(emitter.run_id(), "abc-123");
+    }
+
+    #[test]
     fn new_sends_every_event_to_every_target() -> Result<(), Box<dyn Error>> {
         let listener_a = UdpSocket::bind("127.0.0.1:0")?;
         let listener_b = UdpSocket::bind("127.0.0.1:0")?;
@@ -554,6 +588,20 @@ mod tests {
             run_id: "abc-123".to_string(),
             ts: chrono::Utc::now(),
             target: "build".to_string(),
+        };
+        let bytes = serde_json::to_vec(&original)?;
+        let parsed: LifecycleEvent = serde_json::from_slice(&bytes)?;
+        assert_eq!(original, parsed);
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_event_round_trips_through_json() -> Result<(), Box<dyn Error>> {
+        let original = LifecycleEvent::Cancelled {
+            run_id: "abc-123".to_string(),
+            ts: chrono::Utc::now(),
+            signal: "SIGINT".to_string(),
+            elapsed_ms: 42,
         };
         let bytes = serde_json::to_vec(&original)?;
         let parsed: LifecycleEvent = serde_json::from_slice(&bytes)?;

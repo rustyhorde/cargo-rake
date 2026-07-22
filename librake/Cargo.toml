@@ -32,6 +32,16 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 ureq = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+signal-hook = { workspace = true }
+
+# Default features only: the `termination` feature only affects ctrlc's Unix
+# build (which is never compiled here, since this dependency is cfg(windows)
+# only) — it is a confirmed no-op on Windows, where ctrlc's console-control
+# handler already covers Ctrl+C/Break/close/logoff/shutdown unconditionally.
+[target.'cfg(windows)'.dependencies]
+ctrlc = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

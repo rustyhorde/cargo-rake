@@ -1191,17 +1191,14 @@ impl Rakefile {
             &skips,
         )?;
         let name_width = self.name_width_for(&plan);
+        crate::signal::install();
         // Lifecycle events are a fire-and-forget observability side channel:
         // dry-run never builds a live emitter (its data would be synthetic),
         // and a `[lifecycle]` table with no license for `events` warns once
         // and behaves exactly like an absent one — never a hard error.
-        let emitter = match (&self.lifecycle, license) {
+        let addresses: Vec<SocketAddr> = match (&self.lifecycle, license) {
             (Some(cfg), Some(payload)) if !dry_run && payload.features.events => {
-                if cfg.resolved_addresses.is_empty() {
-                    Emitter::disabled()
-                } else {
-                    Emitter::new(cfg.resolved_addresses.clone())
-                }
+                cfg.resolved_addresses.clone()
             }
             (Some(_), _) if !dry_run => {
                 print_label(
@@ -1209,10 +1206,13 @@ impl Rakefile {
                     "lifecycle events configured but not licensed — run `rake license <key>` \
                      to activate; continuing without event emission",
                 );
-                Emitter::disabled()
+                Vec::new()
             }
-            _ => Emitter::disabled(),
+            _ => Vec::new(),
         };
+        // `Emitter::new` already falls back to a disabled/no-op emitter for an
+        // empty address list, so this one call site covers every branch above.
+        let emitter = Emitter::new(addresses.clone());
         emitter.emit(&LifecycleEvent::BeforeAll {
             run_id: emitter.run_id().to_string(),
             ts: Utc::now(),
@@ -1221,6 +1221,7 @@ impl Rakefile {
             project: ProjectInfo::detect(),
         });
         let start = Instant::now();
+        crate::signal::begin_run(emitter.run_id().to_string(), addresses, start);
         let mut updates: Vec<UpdateRecord> = Vec::new();
         let result = self.run_steps(
             &plan.steps,
@@ -1237,6 +1238,23 @@ impl Rakefile {
         if !dry_run {
             print_total_runtime(elapsed);
         }
+        if crate::signal::cancel_requested() {
+            let code = crate::signal::resolved_exit_code();
+            emitter.emit(&LifecycleEvent::AfterAll {
+                run_id: emitter.run_id().to_string(),
+                ts: Utc::now(),
+                elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                exit_code: Some(code),
+                success: false,
+                tool_updates: updates.len(),
+            });
+            crate::signal::end_run();
+            return Ok(RunReport {
+                status: Some(synth_cancelled_status(code)),
+                elapsed,
+                updates,
+            });
+        }
         emitter.emit(&LifecycleEvent::AfterAll {
             run_id: emitter.run_id().to_string(),
             ts: Utc::now(),
@@ -1248,6 +1266,7 @@ impl Rakefile {
             success: !matches!(&result, Ok(Some(st)) if !st.success()),
             tool_updates: updates.len(),
         });
+        crate::signal::end_run();
         result.map(|status| RunReport {
             status,
             elapsed,
@@ -1738,6 +1757,12 @@ fn run_one<'rf>(
         }
         let status = result?;
         last = Some(status);
+        // A cancellation always stops the chain, even for a command that
+        // declares `skip_on_error` — the run is stopping, not tolerating a
+        // failure.
+        if crate::signal::cancel_requested() {
+            return Ok((Some(status), true));
+        }
         if !status.success() && !command.skip_on_error {
             return Ok((Some(status), true));
         }
@@ -1782,6 +1807,7 @@ const STATUS_LABELS: &[&str] = &[
     "Warning",
     "Updated",
     "Installed",
+    "Cancelled",
 ];
 
 /// The longest [`STATUS_LABELS`] entry, in bytes (all ASCII, so == chars).
@@ -1889,6 +1915,38 @@ fn print_target_skipped(target: &str, name_width: usize) {
     print_skipped(target, "skip requested", name_width);
 }
 
+/// Print a `Cancelled` status line when a run is interrupted by a caught
+/// signal (Unix) or console control event (Windows), in the same shape as
+/// the other status lines.
+pub(crate) fn print_cancelled(signal: &str) {
+    let _ = writeln!(stderr()).ok();
+    print_justified(
+        BOLD_CYAN,
+        "Cancelled",
+        &format!("received {signal} — stopping"),
+        Some(BOLD_YELLOW),
+    );
+}
+
+/// Fabricate an [`ExitStatus`] carrying exactly `code`, for reporting the
+/// convention exit code (130/143/131 on Unix, 130 on Windows) chosen for a
+/// cancelled run, rather than whatever raw status a killed child happened to
+/// produce.
+#[cfg(unix)]
+fn synth_cancelled_status(code: i32) -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt;
+    ExitStatus::from_raw(code << 8)
+}
+
+/// Fabricate an [`ExitStatus`] carrying exactly `code` (Windows: the raw
+/// value *is* the exit code, no bit-shift needed). See the Unix variant just
+/// above for why this exists.
+#[cfg(windows)]
+fn synth_cancelled_status(code: i32) -> ExitStatus {
+    use std::os::windows::process::ExitStatusExt;
+    ExitStatus::from_raw(code as u32)
+}
+
 /// Spawn a single named command from its already-resolved `program`/`args`,
 /// inheriting the parent's stdio. A blank line and the command's status line
 /// (`Running [ <name> ] <program args>`, the name green on a TTY) are printed
@@ -1915,16 +1973,45 @@ fn spawn_resolved(
         .collect::<Vec<_>>()
         .join(" ");
     print_label("Running", &format!("{name} {invocation}"));
-    ProcessCommand::new(program)
+    let mut child = ProcessCommand::new(program)
         .args(args)
-        .status()
+        .spawn()
         .map_err(|source| Error::Spawn {
             target: target.to_string(),
             command: command.name.clone(),
             program: program.to_string(),
             source,
-        })
+        })?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                if crate::signal::cancel_requested() {
+                    let _ = child.kill().ok();
+                    return child.wait().map_err(|source| Error::Spawn {
+                        target: target.to_string(),
+                        command: command.name.clone(),
+                        program: program.to_string(),
+                        source,
+                    });
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            Err(source) => {
+                return Err(Error::Spawn {
+                    target: target.to_string(),
+                    command: command.name.clone(),
+                    program: program.to_string(),
+                    source,
+                });
+            }
+        }
+    }
 }
+
+/// How often `spawn_resolved`'s poll loop checks whether the running child
+/// has exited or a cancellation has been requested.
+const POLL_INTERVAL: Duration = Duration::from_millis(30);
 
 /// Microseconds in a millisecond.
 const US_PER_MS: u128 = 1_000;
@@ -2037,6 +2124,13 @@ mod tests {
     const TOML_EXIT1: &str = r#"["cmd", "/c", "exit", "1"]"#;
     #[cfg(not(windows))]
     const TOML_EXIT1: &str = r#"["false"]"#;
+
+    // A command that sleeps long enough for a test to reliably flip the
+    // cancellation flag mid-run.
+    #[cfg(windows)]
+    const CMD_SLEEP2: &str = r#"cmd = ["cmd", "/c", "timeout", "/t", "2"]"#;
+    #[cfg(not(windows))]
+    const CMD_SLEEP2: &str = r#"cmd = ["sleep", "2"]"#;
 
     #[test]
     fn format_duration_promotes_units() {
@@ -3480,6 +3574,59 @@ cmd = ["cargo", "doc"]
         let rakefile = Rakefile::from_toml_str(&toml)?;
         let width = rakefile.plan_name_width(&["default"])?;
         assert_eq!(width, "my-build".len());
+        Ok(())
+    }
+
+    // --- cancellation tests ---
+
+    #[test]
+    fn synth_cancelled_status_reports_code_and_failure() {
+        let status = super::synth_cancelled_status(130);
+        assert_eq!(status.code(), Some(130));
+        assert!(!status.success());
+    }
+
+    // Manipulates process-global cancellation state (`crate::signal`), so run
+    // this via `cargo nextest run`, which isolates each test into its own
+    // process (this project's normal test runner) rather than `cargo test`,
+    // which would run it concurrently with other tests in the same process.
+    #[test]
+    fn cancellation_kills_child_promptly() -> TestResult {
+        use std::thread;
+        use std::time::Instant;
+
+        use super::{Host, ShellFamily};
+        use crate::signal::test_support::{force_cancelled, reset};
+
+        let toml = format!("[[target.go.command]]\nname = \"slow\"\n{CMD_SLEEP2}\n");
+        let rakefile = Rakefile::from_toml_str(&toml)?;
+        let host = Host {
+            os: "linux",
+            family: "unix",
+            arch: "x86_64",
+        };
+
+        // Flip the cancellation flag shortly after the run starts, simulating
+        // a caught signal without needing to send a real one.
+        let _join = thread::spawn(|| {
+            thread::sleep(Duration::from_millis(80));
+            force_cancelled(130);
+        });
+
+        let start = Instant::now();
+        let report = rakefile.run_with(&["go"], ShellFamily::Posix, host)?;
+        let elapsed = start.elapsed();
+        reset();
+
+        // The command sleeps 2s; if the child were not killed, this would
+        // take close to that long. A bound well under 2s proves the poll
+        // loop noticed the flag and killed the child rather than waiting for
+        // it to finish on its own.
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "took {elapsed:?}, child was not killed promptly"
+        );
+        assert_eq!(report.status.and_then(|s| s.code()), Some(130));
         Ok(())
     }
 }

@@ -1944,7 +1944,7 @@ fn synth_cancelled_status(code: i32) -> ExitStatus {
 #[cfg(windows)]
 fn synth_cancelled_status(code: i32) -> ExitStatus {
     use std::os::windows::process::ExitStatusExt;
-    ExitStatus::from_raw(code as u32)
+    ExitStatus::from_raw(code.cast_unsigned())
 }
 
 /// Spawn a single named command from its already-resolved `program`/`args`,

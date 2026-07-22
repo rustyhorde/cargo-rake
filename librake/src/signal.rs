@@ -87,7 +87,7 @@ fn install_windows() {
     // the same generic name here. Default features are sufficient: the
     // `termination` feature only affects ctrlc's Unix build (see
     // librake/Cargo.toml).
-    let _ = ctrlc::set_handler(|| handle("console-event", 130));
+    drop(ctrlc::set_handler(|| handle("console-event", 130)));
 }
 
 /// The shared reaction to a caught signal/console event: emit the
